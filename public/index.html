@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>物种标注工坊</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <span class="logo">标</span>
+    <div>
+      <h1>物种标注工坊</h1>
+      <p>批量识别 · 人工确认 · 写回图片</p>
+    </div>
+  </div>
+
+  <div class="preset">
+    <label for="presetSel">这批照片是</label>
+    <select id="presetSel"></select>
+    <span id="presetHint" class="hint"></span>
+  </div>
+
+  <div class="right">
+    <span id="engineChips" class="chips"></span>
+    <button id="authorBtn" class="ghost mini" title="用着不顺手、想要个新功能，直接找作者">联系作者</button>
+  </div>
+</header>
+
+<div class="upbar" id="upbar" hidden>
+  <span class="upbar-text" id="upbarText"></span>
+  <span class="upbar-notes" id="upbarNotes"></span>
+  <button class="upbar-go" id="upbarGo">立即更新</button>
+  <button class="upbar-x" id="upbarX" title="稍后再说">×</button>
+</div>
+
+<div class="layout">
+  <aside class="rail">
+    <div class="rail-head">文件夹<button id="treeRefresh" class="rail-refresh" title="重新读取磁盘和文件夹（新插的 U 盘、刚建的文件夹）">↻</button></div>
+    <div class="pathbox">
+      <input id="pathInput" type="text" spellcheck="false" placeholder="粘贴完整路径，回车进入">
+      <button id="goBtn" title="进入">↵</button>
+    </div>
+    <div id="places" class="places"></div>
+    <div id="tree" class="tree"></div>
+  </aside>
+
+  <main class="main">
+    <div class="toolbar">
+      <div class="crumbs"><button id="upBtn" class="ghost" title="上一级">↑</button><span id="curPath"></span><em id="dirStat"></em></div>
+      <div class="tools">
+        <div class="seg" id="filterSeg">
+          <button data-f="all" class="on">全部</button>
+          <button data-f="nolatin" title="只显示没有写拉丁学名的图（标签和文件名都没有学名），方便快速找到还没鉴定的">没有学名 <b id="nolatinCount" class="fc">0</b></button>
+          <button data-f="todo">未标注</button>
+          <button data-f="done">已标注</button>
+          <button data-f="cand">有候选</button>
+        </div>
+        <button id="selAll" class="ghost">全选未标注</button>
+        <button id="selNone" class="ghost">清空</button>
+        <button id="archiveBtn" class="ghost" title="把本文件夹里已标注的图片，按物种名分进子文件夹">按物种归档</button>
+        <button id="exportBtn" class="ghost" title="导出带拍摄时间和经纬度的标注明细、物种清单">导出清单</button>
+        <button id="runBtn" class="primary" disabled>识别选中 <b id="selCount">0</b></button>
+      </div>
+    </div>
+
+    <div id="grid" class="grid"></div>
+    <div id="empty" class="empty" hidden></div>
+  </main>
+
+  <aside class="panel" id="panel">
+    <div class="panel-empty" id="panelEmpty">
+      <p>点左边任意一张图</p>
+      <p class="dim">右侧会出现候选物种，选中一个就能写回图片</p>
+    </div>
+    <div id="panelBody" hidden>
+      <div class="preview"><img id="pvImg" alt=""></div>
+      <div class="fname" id="pvName"></div>
+      <div class="flabel" id="pvLabel"></div>
+      <div class="fexif" id="pvExif"></div>
+
+      <div class="sec-title">候选物种 <span id="pvVerdict" class="dim"></span></div>
+      <div id="candList" class="cands"></div>
+
+      <div class="sec-title">手动填写</div>
+      <div class="manual">
+        <input id="inCn" type="text" placeholder="中文名">
+        <input id="inLatin" type="text" placeholder="学名（拉丁）">
+        <input id="inNote" type="text" placeholder="备注：地点、生境…（可选）">
+      </div>
+
+      <div class="panel-foot">
+        <label class="check"><input id="chkRename" type="checkbox"> 同时重命名文件</label>
+
+        <div id="renameOpts" class="rename-opts" hidden>
+          <div class="opt-row">
+            <span class="opt-lab">顺序</span>
+            <div class="seg sm" id="segOrder">
+              <button data-v="first" class="on">物种名_原名</button>
+              <button data-v="last">原名_物种名</button>
+            </div>
+          </div>
+          <div class="opt-row">
+            <span class="opt-lab">用哪个名</span>
+            <div class="seg sm" id="segPick">
+              <button data-v="cn" class="on">中文名</button>
+              <button data-v="latin">拉丁名</button>
+              <button data-v="both">中文+拉丁</button>
+            </div>
+          </div>
+          <div class="opt-prev">新文件名：<b id="renamePrev">—</b></div>
+        </div>
+
+        <label class="check"><input id="chkArchive" type="checkbox"> 写入后归档到「物种名」子文件夹</label>
+
+        <div class="foot-row">
+          <button id="hubBtn" class="ghost wide" title="把这张图送到物种聚合台，看多站的完整结果。上面开着哪几个模型，聚合台就开哪几个">在聚合台查看这张 ↗</button>
+          <button id="writeBtn" class="primary wide" disabled>确认并写入图片</button>
+        </div>
+        <div id="writeMsg" class="msg"></div>
+      </div>
+    </div>
+  </aside>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<div class="mask" id="authorMask">
+  <div class="sheet author">
+    <h3>联系作者</h3>
+    <p class="tip">用着不顺手、想要个新功能、或者觉得某个物种名不对，都可以直接找我。</p>
+    <div class="qr"><img src="/author-qr.png" alt="作者微信二维码" width="260"></div>
+    <p class="author-line">微信扫码添加 · 备注「物种标注工坊」</p>
+    <div class="sheet-actions">
+      <button id="authorClose" class="ghost">关闭</button>
+    </div>
+  </div>
+</div>
+
+<div class="mask" id="hubMask">
+  <div class="sheet hub">
+    <h3 id="hubTitle">这一步要先装「物种鉴定聚合台」</h3>
+    <p class="tip" id="hubTip">识别、确认候选、写入标注、导出、按物种归档 —— 这些在这个工坊里都能自己完成，不需要聚合台。只有「在聚合台查看这张」是把同一张图交给它，看那边的多站完整结果。</p>
+    <ol class="hub-steps" id="hubSteps">
+      <li>下载后放到一个固定文件夹（Windows 免安装，一个 exe 就够）</li>
+      <li>双击运行，它会自己打开 <code>127.0.0.1:8791</code></li>
+      <li>回到这里，再点一次「在聚合台查看这张」</li>
+    </ol>
+    <p class="hub-sub" id="hubTried"></p>
+    <p class="hub-dl" id="hubDlLine"></p>
+    <div class="sheet-actions">
+      <button id="hubGet" class="primary">去下载</button>
+      <button id="hubClose" class="ghost">先跳过</button>
+    </div>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

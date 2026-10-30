@@ -1,0 +1,26 @@
+# ---------- 本机配置与账号（含明文密钥，绝对不要上传） ----------
+data/
+data-tagden/
+oss.config.json
+.cache/
+.probe/
+.workbuddy/
+
+# ---------- 构建产物（体积大，走 OSS 分发，不进仓库） ----------
+node_modules/
+.build-tools/
+dist/
+dist-mac/
+release-mac/
+*.exe
+*.zip
+*.7z
+
+# ---------- 编辑器 / 系统 ----------
+.DS_Store
+Thumbs.db
+desktop.ini
+*.log
+*.tmp
+.idea/
+.vscode/
