@@ -42,6 +42,8 @@ const STATS = require('./lib/stats');
 const ASSETS = require('./lib/assets');
 // 自然在线（账号相册）—— 复用 nature-client 项目里那套模块，本文件只管路由和任务
 const NAT = require('./lib/nature-store');
+// 内置「识别账号」：只给识别用，相册/写回鉴定仍走 NAT（用户自己登录）
+const NATSHARE = require('./lib/nat-share');
 // 照片评分（内置）：算法在浏览器 Worker 里跑，这里只管缓存、星级、连拍分组和 AI 设置
 const SCORE = require('./lib/score-store');
 const SCAI = require('./lib/score-ai');
@@ -178,8 +180,10 @@ if (NAT.loggedOut()) {
   config.sites.xingse = { ...(config.sites.xingse || {}), token: '', tokenAt: 0 };
 }
 
-/* 老版本（≤0.6.14）把一枚共用的自然在线账号烧进了种子，随 exe 分发（谁都能提取出来用）。
-   新版本种子不再烧这个账号：登录框让用户填自己的账号密码。
+/* 老版本（≤0.6.14）把一枚共用的自然在线账号烧进种子当「登录态」用，随 exe 分发（谁都能提取出来用）。
+   0.6.15 起这枚账号不再出现在配置里：登录框让用户填自己的账号密码。
+   0.6.20 起它改成「识别专用」重新进种子（lib/seed.js 的 natureShare 键），只给识别，
+   不参与相册，所以这里该清的还是清。
    升级上来的老用户，本机配置里残留的共用账号/令牌按 SHA-256 指纹清一次
    ——只留指纹不存原文，且打上标记只清一次，用户之后登录自己的账号不会再被清。 */
 const SEED_XINGSE_FP = {
@@ -272,6 +276,9 @@ function siteReady(key) {
   const c = config.sites?.[acc] || config.sites?.[key] || {};
   if (m.auth === 'key') return (m.fields || [{ key: 'apiKey' }]).some((f) => f.secret && c[f.key]);
   if (m.auth === 'login') return !!(c.username && c.password);
+  // 自然在线：识别走包里内置的账号（lib/nat-share.js），所以没登录自己的账号也算可用；
+  // 相册/写回鉴定才需要登录，那一块在 /api/nat/status 里单独判断。
+  if (key === 'xingse') return !!(c.token || NATSHARE.has());
   if (m.auth === 'captcha') return !!c.token;
   if (m.auth === 'manual') return (m.fields || []).some((f) => c[f.key]);
   return false;
@@ -1970,9 +1977,11 @@ function walkImageFilesShallow(dir) {
  * （从 nature-client 项目原样拷过来，只依赖 lib/http.js），账号与令牌由 lib/nature-store.js 管。
  *
  * 分工，别越界：
- *   · 识别还是走 lib/adapters.js 里的 xingse 适配器 —— 那是「传图换候选物种」；
- *   · 这里管的是**账号里的相册**：新建、上传、浏览、批量下载、删除。
- * 两者共用同一个账号，但互不干涉。
+ *   · 识别还是走 lib/adapters.js 里的 xingse 适配器 —— 那是「传图换候选物种」，
+ *     用的是包里内置的识别账号（lib/nat-share.js），不需要用户登录；
+ *   · 这里管的是**账号里的相册**：新建、上传、浏览、批量下载、删除，
+ *     用的是用户自己登录的自然在线账号（lib/nature-store.js）。
+ * 两套账号互不干涉：用户没登录也能识别；登录了才能碰自己的相册。
  *
  * 一条硬规则：账号密码和令牌绝不出本机。浏览器只跟 127.0.0.1 的这一层说话，
  * 图片也走本机代理（/api/nat/img）—— 直连站点会同时撞上 CORS、防盗链和令牌泄露。
@@ -2151,6 +2160,8 @@ async function handleNature(req, res, pathname, q) {
       host: info.host,
       central: info.central, // false 表示指的是本地假站点（联调中）
       hasCreds: info.hasCreds,
+      // 识别用的内置账号在不在（只说有没有，账号和令牌都不出本机）
+      share: NATSHARE.info(),
     });
   }
 
@@ -2161,14 +2172,13 @@ async function handleNature(req, res, pathname, q) {
 
   if (pathname === '/api/nat/login' && req.method === 'POST') {
     const b = await readJson(req);
-    // 种子不再带自然在线账号：账号密码由用户在登录框里填，随验证码一起上来
+    // 这里登录的是**用户自己的**账号（相册用）；识别用的是包里内置的那一枚，与这里无关
     const u = String(b.username || '').trim();
     const p = String(b.password || '');
     if (!u || !p) return sendJson(res, 400, { ok: false, error: '请填写自然在线的账号和密码' });
     X.setCredentials(u, p);
     await X.login(b.captcha, b.key);
-    // 这份账号同时也是「识别」模块（xingse 站点）的凭据：登录后把新令牌同步过去，
-    // 两处共用同一个会话，别一边新令牌一边种子里那枚旧的。
+    // 把新令牌同步给识别模块，作为内置账号失效时的备胎（主用仍是种子里那枚）。
     // 账号密码也落进本机配置（config.json 本来就是加密的），下次令牌失效只要再输验证码。
     config.sites.xingse = { ...(config.sites.xingse || {}), username: u, password: p, token: X.token, tokenAt: Date.now() };
     persistConfig();
@@ -2178,8 +2188,8 @@ async function handleNature(req, res, pathname, q) {
 
   if (pathname === '/api/nat/logout' && req.method === 'POST') {
     X.logout();
-    // 识别模块和这里用的是同一个账号：退出就连它一起退，并立刻落盘 ——
-    // 不然重启后种子里那枚旧令牌又把两边都顶回登录态（启动时的 NAT.loggedOut() 也会接着压制它）。
+    // 退出只退「相册」这一套（用户自己的账号）；识别用的内置账号不受影响，
+    // 退出后照样能识别。落盘标记留着，重启后启动时的 NAT.loggedOut() 也不会把旧令牌顶回来。
     config.sites.xingse = { ...(config.sites.xingse || {}), token: '', tokenAt: 0 };
     persistConfig();
     return sendJson(res, 200, { ok: true });
@@ -3077,7 +3087,8 @@ async function handleApi(req, res, pathname, q) {
       keyword = GNAT.keywordOf(region?.didian || region?.pro || region?.name || '');
       scope = PPBC.scopeLabel(region || {});
     }
-    const token = String(config.sites?.xingse?.token || '');
+    // 名录是只读查询、与账号无关：用户自己的令牌优先，没登录就用内置识别账号的
+    const token = String(config.sites?.xingse?.token || '') || NATSHARE.token();
     try {
       const out = await GNAT.genusBySites(token, { genus, keyword });
       return sendJson(res, 200, { ok: true, scope, ...out });
@@ -3109,7 +3120,7 @@ async function handleApi(req, res, pathname, q) {
       String(lp.placeName || '').trim() ||
       GNAT.keywordOf(region?.name || '');
     if (!lp.code && !lp.placeId) place = '';
-    const token = String(config.sites?.xingse?.token || '');
+    const token = String(config.sites?.xingse?.token || '') || NATSHARE.token();
     const url =
       'https://ecp.ibiodiversity.cn/msearch?kw=' + encodeURIComponent(genus) +
       (place ? '&place=' + encodeURIComponent(place) : '');

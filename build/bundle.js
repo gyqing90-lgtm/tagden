@@ -38,6 +38,8 @@ const MODULES = [
   // 自然在线（账号相册）：漏了这两个，源码跑得好好的，打出来的 exe 会报「模块未打包」
   'lib/nature-client.js',
   'lib/nature-store.js',
+  // 内置识别账号（只给识别用）：漏了它，exe 里自然在线识别会报「模块未打包」
+  'lib/nat-share.js',
   // 从聚合台并进来的两个查询模块：nature.js 查「某属在本地名录里有哪些种」，
   // gbifds.js 查「某属在 GBIF 本地区有哪些种」。都随结果页的学名小标一起用。
   'lib/nature.js',

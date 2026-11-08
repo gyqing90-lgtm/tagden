@@ -3618,14 +3618,21 @@ async function natStatus() {
       }
     } else {
       $('natDot').className = 'nat-dot warn';
-      who.textContent = '未登录' + (r.reason && r.reason !== '未登录' ? '：' + r.reason : '');
+      // 识别用的是包里内置的账号，未登录只影响相册/写回，文案上要说清楚，别让人以为识别坏了
+      who.textContent =
+        '相册未登录' +
+        (r.reason && r.reason !== '未登录' && r.reason !== '相册未登录' ? '：' + r.reason : '') +
+        (r.share && r.share.hasToken ? '（识别不受影响）' : '');
       $('natLoginBox').hidden = false;
       // 配置里存过用户自己登录过的账号名，就先预填上，少打一截
       if ($('natUserInput') && r.username && !$('natUserInput').value) $('natUserInput').value = r.username;
       $('natLogoutBtn').hidden = true;
       $('natAlbumList').innerHTML = '';
       $('natAlbumCount').textContent = '0';
-      natEmpty('先登录', '自然在线的验证码只能人眼看，所以每次换令牌都要手动输一次。登录后令牌加密存在本机，重启不用再输。');
+      natEmpty(
+        '先登录（只影响相册）',
+        '自然在线的识别用的是程序内置的账号，不登录也能认植物；相册和写回鉴定动的是「你自己的照片」，所以要用你自己的账号。验证码只能人眼看，每次换令牌手动输一次；登录后令牌加密存在本机，重启不用再输。',
+      );
       await natCaptcha();
     }
   } catch (err) {
