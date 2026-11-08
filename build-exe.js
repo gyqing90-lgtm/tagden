@@ -22,7 +22,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { execFileSync } = require('node:child_process');
-const { buildBundle } = require('./build/bundle');
+const { buildBundle, SEA_ASSETS } = require('./build/bundle');
 
 const ROOT = __dirname;
 const BUILD = path.join(ROOT, '.build');
@@ -117,6 +117,14 @@ function main() {
   execFileSync(process.execPath, ['--check', mainPath], { stdio: 'inherit' });
 
   console.log('→ 生成 SEA blob');
+  // 大二进制走 SEA 原生 assets：原字节进 blob，不像 base64 那样涨 33%。
+  // 只用相对 ROOT 的路径（sea-config.json 在 .build/ 下，绝对路径最省心）
+  const seaAssets = {};
+  for (const v of SEA_ASSETS) {
+    const abs = path.join(ROOT, v.rel);
+    if (fs.existsSync(abs)) seaAssets[v.key] = abs;
+    else console.log(`  （缺 ${v.rel}，跳过该内置资源）`);
+  }
   const seaConfig = {
     main: path.relative(ROOT, mainPath).replace(/\\/g, '/'),
     output: path.relative(ROOT, path.join(BUILD, 'sea-prep.blob')).replace(/\\/g, '/'),
@@ -124,6 +132,7 @@ function main() {
     useSnapshot: false,
     useCodeCache: false,
   };
+  if (Object.keys(seaAssets).length) seaConfig.assets = seaAssets;
   const seaConfigPath = path.join(BUILD, 'sea-config.json');
   fs.writeFileSync(seaConfigPath, JSON.stringify(seaConfig, null, 2), 'utf8');
   runNode(['--experimental-sea-config', seaConfigPath]);
@@ -137,11 +146,46 @@ function main() {
   if (!fs.existsSync(POSTJECT)) {
     throw new Error('缺少 postject，请先执行：npm install --prefix .build-tools postject');
   }
-  try {
-    runNode([POSTJECT, TMP_PATH, 'NODE_SEA_BLOB', seaConfig.output, '--sentinel-fuse', SENTINEL]);
-  } catch (err) {
-    // 注入阶段 postject 会嘀咕一句「签名看起来是坏的」，那是正常的，别吓人
-    console.log('  （postject 的 warning 属正常，下面以最终产物为准）');
+  const blobSize = fs.statSync(seaConfig.output).size;
+  const runtimeSize = fs.statSync(process.execPath).size;
+
+  /* postject 把整个 exe 读进 libpe 的 WASM 堆，堆要涨到七八百 MB；机器一忙
+   * 就会偶发 Array buffer allocation failed / Aborted()。同一份输入重跑几次
+   * 往往就过了（实测三次失败后连续四次全过），所以这里重试而不是直接放弃。
+   * 注意：绝不能像以前那样吞掉异常继续往下走 —— 那样会打出个只有 Node 运行时、
+   * 没有程序逻辑的假 exe，体积明显偏小还照样发给用户。 */
+  const MAX_TRY = 5;
+  let lastErr = null;
+  for (let attempt = 1; attempt <= MAX_TRY; attempt += 1) {
+    if (attempt > 1) {
+      console.log(`  注入失败（第 ${attempt - 1} 次），重新复制运行时再试…`);
+      fs.rmSync(TMP_PATH, { force: true });
+      fs.copyFileSync(process.execPath, TMP_PATH);
+    }
+    try {
+      runNode([POSTJECT, TMP_PATH, 'NODE_SEA_BLOB', seaConfig.output, '--sentinel-fuse', SENTINEL]);
+      lastErr = null;
+      break;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  if (lastErr) {
+    fs.rmSync(TMP_PATH, { force: true });
+    throw new Error(
+      `注入 blob 失败（已重试 ${MAX_TRY} 次）：${(lastErr.message || String(lastErr)).split('\n')[0]}\n` +
+        `  blob ${(blobSize / 1048576).toFixed(1)} MB，运行时 ${(runtimeSize / 1048576).toFixed(1)} MB\n` +
+        `  多半是内存吃紧 —— 关掉几个占内存的程序再打包；\n` +
+        `  另一个已知坑：Node 22.22.2 在 postject 的 WASM 堆上超过约 11 MB 就分配失败，\n` +
+        `  换 22.23.2 及以上即可（用那个 node 跑本脚本，blob 与运行时才是同一版本）。`,
+    );
+  }
+
+  // 双保险：注入成功的话文件一定比运行时大（至少大出 blob 的体积）
+  const grew = fs.statSync(TMP_PATH).size - runtimeSize;
+  if (grew < blobSize * 0.9) {
+    fs.rmSync(TMP_PATH, { force: true });
+    throw new Error(`注入后体积只多了 ${grew} 字节，小于 blob 的 ${blobSize} 字节，产物不可信，已中止。`);
   }
 
   console.log('→ 替换成品');

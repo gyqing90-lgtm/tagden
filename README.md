@@ -30,10 +30,14 @@ tagden/
 │   ├── imgmeta.js     ★ 新写：XMP / PNG iTXt 读写
 │   ├── exif.js        ★ 新写：读拍摄时间 / GPS / IFD1 内嵌缩略图
 │   ├── labelcache.js  ★ 新写：标签索引缓存（大文件夹秒开的关键）
+│   ├── colcn.js       ★ 新写：内置《中国生物物种名录》学名→大陆中文名查表
+│   ├── taxonomy.js    学名→界门纲目科属（iNat 优先、GBIF 兜底）
 │   ├── assets.js      ★ 新写：静态文件统一入口（源码读磁盘 / exe 读内存）
 │   ├── env.js         三个目录的唯一裁决处（源码 / exe / mac 目录版）
 │   ├── http.js parse.js inat.js ppbc.js baidu.js ebird.js secure.js
 ├── public/            index.html / app.js / style.css（打包后内联进 exe）
+│                      colcn.bin = 名录索引（gzip，base64 内联进 exe）
+├── tools/build-colcn.js  ★ 名录索引构建器（`--download` 自动抓当年分册）
 ├── data/config.json   加密配置（DPAPI，含各站账号）
 └── testpics/          测试图 + 标注记录.csv
 ```
@@ -63,7 +67,8 @@ tagden/
 | GET | `/api/hub/link?path=&group=` | 探测聚合台 → `{url}`，URL 里带上 `?img=` `&group=` `&sites=` 当前开着的站点（没起 503 / 版本旧 409） |
 | GET | `/img?path=` | 原图字节（带 ETag，`<img>` 直接用） |
 | GET | `/img?path=&thumb=1` | **内嵌缩略图**（几 KB）；没有就自动回退原图，回退时没有 `x-thumb` 头 |
-| POST | `/api/identify` | `{path, sources[], dataSmall?, dataJpeg?}` → 各站结果 + 合并候选 |
+| POST | `/api/identify` | `{path, sources[], dataSmall?, dataJpeg?}` → 各站结果 + 合并候选（中文名已换成大陆规范名） |
+| POST | `/api/colcn/test` | `{scientificName}` → 内置名录查名自检 `{ok, latin, cn, source, stat}` |
 | POST | `/api/write` | `{path, cn, latin, note, source, rename, renameOrder, renamePick, archive}` → 写入并追加 CSV |
 | POST | `/api/archive` | `{path, apply}` → 按物种分文件夹；`apply:false` 只统计不动手 |
 | POST | `/api/config` | 保存方案 `{preset}` / 模型开关 `{picks:[站点key]}` / 改名开关 / 改名格式 / 归档开关 |

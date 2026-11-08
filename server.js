@@ -22,14 +22,37 @@ const crypto = require('node:crypto');
 const { URL } = require('node:url');
 
 const { Sites, SITE_META } = require('./lib/adapters');
-const { aggregate } = require('./lib/aggregate');
+const { aggregate, buildVerdict } = require('./lib/aggregate');
+// 学名旁那几个查询小标用的模块（从聚合台并进来）：
+//   INAT 属名→taxon_id、PPBC 地区→植物智参数、EBIRD 本地区近14天记录、
+//   GNAT 自然在线名录里某属有哪些种、GBIFDS 某属在 GBIF 本地区有哪些种。
+// 注意 GNAT 与下面的 NAT 不是一回事：NAT 是登录自然在线管相册的账号客户端。
+const INAT = require('./lib/inat');
+const PPBC = require('./lib/ppbc');
+const EBIRD = require('./lib/ebird');
+const GNAT = require('./lib/nature');
+const GBIFDS = require('./lib/gbifds');
 const IMG = require('./lib/imgmeta');
 const EX = require('./lib/exif');
 const secure = require('./lib/secure');
+const SEED_CIPHER = require('./lib/seed');
 const LC = require('./lib/labelcache');
+const TAXO = require('./lib/taxonomy');
+const STATS = require('./lib/stats');
 const ASSETS = require('./lib/assets');
+// 自然在线（账号相册）—— 复用 nature-client 项目里那套模块，本文件只管路由和任务
+const NAT = require('./lib/nature-store');
+// 照片评分（内置）：算法在浏览器 Worker 里跑，这里只管缓存、星级、连拍分组和 AI 设置
+const SCORE = require('./lib/score-store');
+const SCAI = require('./lib/score-ai');
+// 本地大模型运行库（llama-server）：内置 Windows CPU 包，第一次用时自己解压再拉起
+const LLAMA = require('./lib/llama');
+// 合并中文名 → 大陆规范名（《中国生物物种名录》CoL China / 物种2000中国节点）。
+// 名录索引内置在程序里，按学名本地查表、覆盖识别站点回的中文名（台名/英名）；
+// 不联网、不要 API Key、不要 R，纯本地、不向外上报。
+const COLCN = require('./lib/colcn');
 // 三个目录都由 env 统一裁决：源码跑是项目根目录，exe 跑是 exe 所在目录
-const { isSea, isAppBundle, DATA_DIR: DATA, DATA_NOTE } = require('./lib/env');
+const { isSea, isAppBundle, APP_DIR, DATA_DIR: DATA, DATA_NOTE } = require('./lib/env');
 
 /**
  * 端口写死 7801。
@@ -56,13 +79,24 @@ const CACHE =
       ? path.join(os.homedir(), 'Library', 'Caches', 'tagden')
       : path.join(DATA, 'cache'));
 const THUMBS = path.join(CACHE, 'thumbs');
+// 浏览器把本机文件夹拖进来时，文件先落在这儿，再交给上传任务；跑完就删
+const NAT_DROP = path.join(CACHE, 'nature-drop');
 const CFG_FILE = path.join(DATA, 'config.json');
 LC.init(path.join(CACHE, 'labels'));
+// 分类阶元（学名 → 界门纲目科属）缓存，查过就不再联网
+TAXO.init(path.join(CACHE, 'taxonomy'));
+// 自然在线：令牌跟 config.json 一起放 data/，图片缓存跟缩略图一起放本机缓存目录
+NAT.init({ dataDir: DATA, cacheDir: CACHE });
+// 照片评分：缓存放 CACHE/score/，AI 的 Key 加密放 data/score-ai.json
+SCORE.init({ dataDir: DATA, cacheDir: CACHE });
+// 本地大模型运行库：解压到 CACHE/llama-runtime/，pid 记在 data/llama.pid
+LLAMA.init({ cacheDir: CACHE });
 try {
   fs.mkdirSync(THUMBS, { recursive: true });
 } catch {}
 
 const IMAGE_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp', '.heic', '.tif', '.tiff', '.bmp', '.gif']);
+const MAX_STAT_FILES = 5000; // 统计扫描上限，防止超大目录把主程序卡死
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'application/javascript; charset=utf-8',
@@ -78,33 +112,113 @@ const MIME = {
 
 /* ---------------- 配置 ---------------- */
 
+/*
+ * 内嵌默认账号（lib/seed.js）
+ *
+ * 和聚合台一样，种子是「机器无关」的密文（kdf=port，只用 lib/secure.js 的内嵌主密钥），
+ * 所以换一台电脑第一次打开也能解开 —— 拿到 exe 的人不用先去设置里填一堆账号就能识别。
+ *
+ * 优先级：本机 config.json 里填过的 > 内嵌种子。种子只补「空着的字段」，
+ * 用户自己改过的一律不动。换账号时用 tools/seal.js 重新生成 seed.js 再打包。
+ */
+let SEED = { sites: {} };
+try {
+  const opened = secure.open(SEED_CIPHER);
+  if (opened.ok && opened.value) SEED = opened.value;
+  else console.log(`  [!!] 内嵌默认账号解密失败：${opened.error || '未知原因'}（照常启动，只是不带默认账号）`);
+} catch (err) {
+  console.log(`  [!!] 内嵌默认账号读取失败：${err.message}（照常启动，只是不带默认账号）`);
+}
+
+/** 把种子里有、本机没填的字段补上；本机已有值永远优先 */
+function applySeed(sites) {
+  const out = sites && typeof sites === 'object' ? sites : {};
+  for (const [site, def] of Object.entries(SEED.sites || {})) {
+    if (!def || typeof def !== 'object') continue;
+    const cur = out[site];
+    if (!cur || typeof cur !== 'object') {
+      out[site] = { ...def };
+      continue;
+    }
+    for (const [k, v] of Object.entries(def)) {
+      if (cur[k] === undefined || cur[k] === '' || cur[k] === null) cur[k] = v;
+    }
+  }
+  return out;
+}
+
 function loadConfig() {
-  const fresh = { port: 7801, sites: {}, sessions: {}, ui: { preset: 'auto', sources: null } };
-  if (!fs.existsSync(CFG_FILE)) return fresh;
-  const raw = fs.readFileSync(CFG_FILE, 'utf8');
-  let merged;
-  try {
-    const opened = secure.open(raw);
-    merged = { ...fresh, ...(opened.value || opened) };
-  } catch {
+  const fresh = { port: APP_PORT, sites: {}, sessions: {}, ui: { preset: 'plant', sources: null } };
+  let merged = fresh;
+  if (fs.existsSync(CFG_FILE)) {
+    const raw = fs.readFileSync(CFG_FILE, 'utf8');
     try {
-      merged = { ...fresh, ...JSON.parse(raw) };
+      const opened = secure.open(raw);
+      merged = { ...fresh, ...(opened.value || opened) };
     } catch {
-      merged = fresh;
+      try {
+        merged = { ...fresh, ...JSON.parse(raw) };
+      } catch {
+        merged = fresh;
+      }
     }
   }
   // 端口不采信配置里的旧值：两个便携版共用一份配置时，这里可能已经被另一个软件
   // 写成了它的端口（8791），照着用就会两个软件抢同一个端口。
   merged.port = APP_PORT;
+  // 新用户第一次打开：账号由内嵌种子补齐，直接就能用
+  merged.sites = applySeed(merged.sites);
   return merged;
 }
 
 const config = loadConfig();
+// 用户在「自然在线」里退出过登录的话，种子里烧的那枚旧令牌不许再顶上：
+// 不然退出后识别模块（xingse 站点）还接着用这个账号，重启后还会被种子悄悄登回去。
+if (NAT.loggedOut()) {
+  config.sites.xingse = { ...(config.sites.xingse || {}), token: '', tokenAt: 0 };
+}
+
+/* 老版本（≤0.6.14）把一枚共用的自然在线账号烧进了种子，随 exe 分发（谁都能提取出来用）。
+   新版本种子不再烧这个账号：登录框让用户填自己的账号密码。
+   升级上来的老用户，本机配置里残留的共用账号/令牌按 SHA-256 指纹清一次
+   ——只留指纹不存原文，且打上标记只清一次，用户之后登录自己的账号不会再被清。 */
+const SEED_XINGSE_FP = {
+  user: 'a5564000ec86e69ccd928a109e15f5f5edbbae1f637ff16aa0d5feadb0b4e642',
+  pass: '420aadc19d0d12c197d143fc3b34389ea1f0968d0b7dc2cb63e9c770cb9ad763',
+  token: '4e05084e0d48d362c0e6c9ddb8f69daac36e6c1a13986c6e50ba6eedbed2e8c7',
+};
+const sha256hex = (s) => require('node:crypto').createHash('sha256').update(String(s), 'utf8').digest('hex');
+if (!config.seedXingsePurged) {
+  const xs = config.sites && config.sites.xingse;
+  let purged = false;
+  if (xs && typeof xs === 'object') {
+    const next = { ...xs };
+    if (next.token && sha256hex(next.token) === SEED_XINGSE_FP.token) { next.token = ''; next.tokenAt = 0; purged = true; }
+    if (next.username && sha256hex(next.username) === SEED_XINGSE_FP.user) { next.username = ''; purged = true; }
+    if (next.password && sha256hex(next.password) === SEED_XINGSE_FP.pass) { next.password = ''; purged = true; }
+    if (purged) config.sites.xingse = next;
+  }
+  const fileTok = NAT.readToken();
+  if (fileTok && sha256hex(fileTok) === SEED_XINGSE_FP.token) {
+    NAT.writeToken('');
+    purged = true;
+  }
+  if (purged) console.log('  [i] 已清除旧版本内置的自然在线共用账号，请在「自然在线」页用你自己的账号登录');
+  config.seedXingsePurged = true;
+  persistConfig();
+}
+// GBIF 面板的中文名补全 / 归纳用 DeepSeek。GBIF 自己的读取接口是公开的、不需要 Key，
+// 要 Key 的是这一步；跟站点账号一起加密落在 data/config.json，浏览器端只拿得到 hasApiKey。
+config.deepseek = { apiKey: '', model: 'deepseek-chat', ...(config.deepseek || {}) };
 let sites = new Sites(config);
+
+// 大陆中文名录随程序内置，不需要任何配置，也不写进 config.json。
+// 这里只预热一次，让启动日志和 /api/state 就能报出版本与收录条数；真正查表是同步的。
+COLCN.init();
 
 function persistConfig() {
   fs.mkdirSync(DATA, { recursive: true });
-  const payload = { port: config.port, sites: config.sites, sessions: config.sessions, ui: config.ui };
+  const payload = { port: config.port, sites: config.sites, sessions: config.sessions, ui: config.ui, deepseek: config.deepseek, seedXingsePurged: config.seedXingsePurged };
   const tmp = `${CFG_FILE}.tmp`;
   fs.writeFileSync(tmp, secure.seal(payload), 'utf8');
   fs.renameSync(tmp, CFG_FILE);
@@ -127,6 +241,25 @@ function schedulePersist(delay = 1200) {
     }
   }, delay);
   if (persistTimer.unref) persistTimer.unref();
+}
+
+/**
+ * 「检索地区」：只决定结果里 iNat / PPBC / 自然在线 / GBIF 那几个小标跳到什么范围，
+ * 不参与识别。前端传了就整体替换，没传才用存下来的那份 —— 三项必须一起换，
+ * 不能逐项兜底（选了「全世界」只传 code 时，placeId 一兜底就变回上次的武夷山，
+ * 于是按福建算了）。
+ */
+function linkPlaceOf(sp) {
+  const conf = config.ui?.linkPlace || {};
+  const qCode = String(sp.get('place') || '').trim();
+  const qId = Number(sp.get('placeId')) || 0;
+  const qName = String(sp.get('placeName') || '').trim();
+  const explicit = Boolean(qCode || qId || qName);
+  return {
+    code: explicit ? qCode : String(conf.code || ''),
+    placeId: explicit ? qId : Number(conf.placeId) || 0,
+    placeName: explicit ? qName : String(conf.placeName || ''),
+  };
 }
 
 /** 这个站点现在能不能用（有账号 / 不需要账号） */
@@ -152,16 +285,10 @@ function siteReady(key) {
  */
 const PRESETS = [
   {
-    key: 'auto',
-    name: '自动（混合）',
-    hint: '各门类都问一遍，最慢但最不容易漏',
-    sources: [
-      'quarryman', 'butterflyai', 'butterflyai-butterfly',
-      'iplant', 'quarryman-plant', 'quarryman-rose', 'xingse',
-      'quarryman-fungi', 'quarryman-snake', 'quarryman-mollusk',
-      'duoshi', 'duoshi-bird', 'duoshi-plant', 'baidu-animal', 'baidu-plant',
-      'dongniao', 'kuaitong', 'dongniao-herp', 'inaturalist',
-    ],
+    key: 'plant',
+    name: '植物',
+    hint: '专问植物，通用站兜底',
+    sources: ['iplant', 'plantnet', 'quarryman-plant', 'quarryman-rose', 'duoshi-plant', 'baidu-plant', 'xingse', 'inaturalist'],
     optional: ['doubao'],
   },
   {
@@ -169,13 +296,6 @@ const PRESETS = [
     name: '昆虫',
     hint: '专问昆虫，动物站兜底',
     sources: ['quarryman', 'butterflyai', 'butterflyai-butterfly', 'duoshi', 'baidu-animal', 'inaturalist'],
-    optional: ['doubao'],
-  },
-  {
-    key: 'plant',
-    name: '植物',
-    hint: '专问植物，通用站兜底',
-    sources: ['iplant', 'quarryman-plant', 'quarryman-rose', 'duoshi-plant', 'baidu-plant', 'xingse', 'inaturalist'],
     optional: ['doubao'],
   },
   {
@@ -207,11 +327,24 @@ function presetAll(presetKey) {
   return { preset: p.key, def: p.sources, all: [...p.sources, ...(p.optional || [])] };
 }
 
+/**
+ * 「点一次算一轮」的模型（目前只有豆包，就是各方案的 optional）。
+ *
+ * 规矩：默认灰着，**用户点一下才亮**；一换方案（= 换类群）就自动收回，要再用得再点一次。
+ * 做法是**不写进 `config.ui.picks`**，只记在这个进程的内存里 ——
+ * 一旦落盘，下次打开程序、或者换个方案再切回来，它就自己亮着了，
+ * 等于在用户没点的情况下又悄悄开始按次计费。
+ */
+const ONE_SHOT_SITES = new Set(PRESETS.flatMap((p) => p.optional || []));
+let oneShotOn = new Set();
+
 function presetSources(presetKey) {
   const { preset, def, all } = presetAll(presetKey);
   // 用户在这个方案里手动关掉/打开过的，优先于默认；换方案再换回来还认得
   const picked = config.ui?.picks?.[preset];
-  const chosen = Array.isArray(picked) ? picked.filter((k) => all.includes(k)) : def;
+  const stored = Array.isArray(picked) ? picked.filter((k) => all.includes(k)) : def;
+  // 一次性模型（豆包）不看历史，只认内存里这一轮点开的 → 换方案/重启自动变灰
+  const chosen = all.filter((k) => (ONE_SHOT_SITES.has(k) ? oneShotOn.has(k) : stored.includes(k)));
   const ready = chosen.filter(siteReady);
   return {
     preset,
@@ -464,16 +597,31 @@ function safeName(s) {
 
 /**
  * 物种名部分：
- *   cn    只用中文名（没有就退到学名）
- *   latin 只用学名（没有就退到中文名）
- *   both  中文名_学名
+ *   cn      只用中文名（没有就退到学名）
+ *   latin   只用学名（没有就退到中文名）
+ *   both    中文名_学名
+ *   latinCn 学名_中文名（和 both 反过来）
  */
 function speciesLabel(cn, latin, pick) {
   const c = safeName(cn);
   const l = safeName(latin);
   if (pick === 'latin') return l || c;
   if (pick === 'both') return c && l ? `${c}_${l}` : c || l;
+  if (pick === 'latinCn') return c && l ? `${l}_${c}` : l || c;
   return c || l;
+}
+
+/** 「只要物种名」时目标重名：在后面加 _2、_3…，绝不覆盖别人的照片 */
+function uniquePathNumbered(target) {
+  if (!fs.existsSync(target)) return target;
+  const ext = path.extname(target);
+  const stem = path.basename(target, ext);
+  const dir = path.dirname(target);
+  for (let i = 2; i < 200; i += 1) {
+    const p = path.join(dir, `${stem}_${i}${ext}`);
+    if (!fs.existsSync(p)) return p;
+  }
+  throw bad('同名文件太多，没有可用的新名字');
 }
 
 /** 目标重名时加 (2) (3)…，绝不覆盖别人的照片 */
@@ -498,16 +646,91 @@ function speciesFolder(cn, latin) {
 }
 
 /**
- * 把文件挪进 rootDir/<物种名>/。已经在里面就原地不动。
+ * 「每个种一个文件夹」时的物种文件夹名：中文 + 学名，和分类阶元文件夹「中文 拉丁」保持一致；
+ * 只有一种就只留那一种。种名靠它区分同属的不同物种，所以能凑出「中文 拉丁」就尽量凑。
+ */
+function speciesSegName(cn, latin) {
+  const c = safeName(cn);
+  const l = safeName(latin);
+  if (c && l) return `${c} ${l}`;
+  return c || l;
+}
+
+/**
+ * 把文件挪进 rootDir/<分段1>/<分段2>/…/ 。已经在里面就原地不动。
  * 目标位置有同名文件时加序号，绝不覆盖别人的照片。
  */
-function moveIntoSpeciesDir(file, rootDir, label) {
-  const box = path.join(rootDir, safeName(label));
-  if (path.dirname(file).toLowerCase() === box.toLowerCase()) return { path: file, moved: false };
+function moveIntoDir(file, rootDir, segments) {
+  const parts = (Array.isArray(segments) ? segments : [segments]).map(safeName).filter(Boolean);
+  if (!parts.length) return { path: file, moved: false, folder: '' };
+  const box = path.join(rootDir, ...parts);
+  const rel = parts.join('/');
+  if (path.dirname(file).toLowerCase() === box.toLowerCase()) return { path: file, moved: false, folder: rel };
   fs.mkdirSync(box, { recursive: true });
   const target = uniquePath(path.join(box, path.basename(file)));
   fs.renameSync(file, target);
-  return { path: target, moved: true, folder: path.basename(box) };
+  return { path: target, moved: true, folder: rel };
+}
+
+/**
+ * 和 moveIntoDir 一样，只是复制过去、源文件留着。
+ * 用在「归并到指定的总文件夹」：把散落各处的照片收进同一棵分类树，原来的目录不动。
+ * 目标重名照样加序号，不会覆盖已有文件。
+ */
+function copyIntoDir(file, rootDir, segments) {
+  const parts = (Array.isArray(segments) ? segments : [segments]).map(safeName).filter(Boolean);
+  if (!parts.length) return { path: file, copied: false, folder: '' };
+  const box = path.join(rootDir, ...parts);
+  const rel = parts.join('/');
+  fs.mkdirSync(box, { recursive: true });
+  const target = uniquePath(path.join(box, path.basename(file)));
+  fs.copyFileSync(file, target);
+  return { path: target, copied: true, folder: rel };
+}
+
+/**
+ * 归档的目录层级：界/门/纲/目/科/属，文件夹名写成「中文 拉丁」（见 lib/taxonomy.js）。
+ * 默认只到属 —— 同属的物种归进同一个属文件夹，种名靠文件名区分。
+ * bySpecies=true 时再往下一级到 种（界/门/纲/目/科/属/种），每个物种一个文件夹。
+ * 查不到分类（没学名、没联网、iNat 和 GBIF 都没有）时退回「未分类/<物种名>」，
+ * 照片照样搬得动，只是位置不理想，界面上会提示有多少张是这样。
+ */
+function archiveSegments(rec, t, bySpecies) {
+  const segs = TAXO.pathSegments(rec);
+  if (segs.length) {
+    if (bySpecies) {
+      const sp = speciesSegName(t.cn, t.latin);
+      if (sp) segs.push(sp);
+    }
+    return segs;
+  }
+  return ['未分类', t.species];
+}
+
+/** 从关键词里挑学名：首字母大写的拉丁词，挑不到就用第一个关键词 */
+function pickLatin(keywords) {
+  const list = (keywords || []).map((k) => String(k || '').trim()).filter(Boolean);
+  return list.find((k) => /^[A-Z][a-z]+\b/.test(k)) || list[0] || '';
+}
+
+/** 分类缓存的键：有学名用学名，只有中文名就用 'cn:中文名'（和 lib/taxonomy.js 一致） */
+function taxoKey(latin, cn) {
+  const l = String(latin || '').trim();
+  if (l) return l.toLowerCase();
+  const c = String(cn || '').trim();
+  return c ? `cn:${c.toLowerCase()}` : '';
+}
+
+/** 单个物种查分类（命中缓存就不联网）。查不到返回 null，绝不抛错 —— 归档不能被网络拖垮。 */
+async function lookupTaxonomy(latin, cn) {
+  const key = taxoKey(latin, cn);
+  if (!key) return null;
+  try {
+    const m = await TAXO.resolve([{ latin: String(latin || '').trim(), cn: String(cn || '').trim() }]);
+    return m.get(key) || null;
+  } catch {
+    return null;
+  }
 }
 
 /** 相对 root 的路径，统一用正斜杠 —— 写进 CSV 以后不管在 Win 还是 mac 打开都能认 */
@@ -520,10 +743,15 @@ function relPath(root, full) {
  * labels 可以给多个（当前物种名 + 上次写过的物种名 + 学名），先把它们从 base 上剥干净，
  * 免得改一次标就多叠一层「金斑喙凤蝶_中华虎凤蝶_原名」。
  */
-function buildName(base, labels, order) {
+function buildName(base, labels, order, suffix = '') {
   const list = [...new Set((Array.isArray(labels) ? labels : [labels]).map((x) => safeName(x)).filter(Boolean))];
   if (!list.length) return base;
   const primary = list[0];
+  // 「只要物种名」：不拼原名；填了自定后缀就带上，没填则由 uniquePathNumbered 加 _2、_3…
+  if (order === 'only') {
+    const tail = safeName(suffix);
+    return tail ? `${primary}_${tail}` : primary;
+  }
   if (base === primary) return primary;
   let stem = base;
   for (let round = 0; round < 4; round += 1) {
@@ -546,6 +774,34 @@ function buildName(base, labels, order) {
 }
 
 /* ---------------- 业务接口 ---------------- */
+
+/* ---------------- 哪些目录不进树 ----------------
+ * 两类：
+ *   ① 名字有规律的系统目录 —— 以 . 开头的隐藏目录（.photo_cache、.Trashes）、
+ *      以 $ 开头的（$RECYCLE.BIN、$SysReset）；
+ *   ② 名字固定的系统/安装目录 —— 回收站、系统卷信息、恢复分区、性能日志、
+ *      MSI 安装临时目录等。这些点了只会报「没有权限」，白占位置还容易被误点。
+ *
+ * 只藏「身份明确」的：Windows、Program Files、Users、ProgramData 这些还留着，
+ * 用户想翻还是能翻进去。判断一律用小写比较，Windows 上大小写不敏感。
+ */
+const HIDDEN_PREFIX = /^[.$]/;
+const HIDDEN_NAMES = new Set([
+  'system volume information', // 系统还原/索引
+  'recycler', // 老版 Windows 回收站
+  'recycled', // 更老的回收站
+  'krecycle', // 金山（WPS/毒霸）的回收站
+  'recovery', // 恢复分区里的还原点
+  'perflogs', // 性能监视器的日志
+  'config.msi', // 安装程序临时目录，装完也不删
+  'msocache', // Office 安装缓存，权限受限
+  'documents and settings', // 老用户目录的联接点，点进去没权限
+]);
+
+/** 这个目录名要不要藏起来 */
+function isHiddenDir(name) {
+  return HIDDEN_PREFIX.test(name) || HIDDEN_NAMES.has(name.toLowerCase());
+}
 
 /** 目录里所有图片的名字，按前端显示顺序排好（列表和标签补读必须用同一套顺序） */
 function imageNames(dir) {
@@ -573,7 +829,7 @@ async function apiList(q) {
   const dir = asDir(q.get('path') || config.ui?.lastDir || places()[0]?.path);
   const entries = fs.readdirSync(dir, { withFileTypes: true });
   const dirs = entries
-    .filter((e) => e.isDirectory() && !HIDDEN_DIR.test(e.name))
+    .filter((e) => e.isDirectory() && !isHiddenDir(e.name))
     .map((e) => ({ name: e.name, path: path.join(dir, e.name) }))
     .sort((a, b) => collator.compare(a.name, b.name));
 
@@ -647,21 +903,114 @@ const STAT_UNDER = 200;
  * 和 /api/list 分开是有意的：树只需要「这一层有哪些文件夹」，不需要图片，
  * 更不能顺手去 stat 几百张图。USB 盘上这差别是 20ms 和 8 秒。
  */
-/**
- * 这些目录不该出现在树里：回收站、系统卷信息、以及各种以 . 开头的隐藏目录。
- * 它们点了也只会报「没有权限」，白占位置还容易被误点。
- */
-const HIDDEN_DIR = /^(\$|\.|System Volume Information$)/i;
-
 async function apiDirs(q) {
   const dir = asDir(q.get('path'));
   const entries = await fsp.readdir(dir, { withFileTypes: true });
   const dirs = entries
-    .filter((e) => e.isDirectory() && !HIDDEN_DIR.test(e.name))
+    .filter((e) => e.isDirectory() && !isHiddenDir(e.name))
     .map((e) => ({ name: e.name, path: path.join(dir, e.name) }))
     .sort((a, b) => collator.compare(a.name, b.name));
   const parent = path.dirname(dir);
   return { ok: true, path: dir, parent: parent === dir ? null : parent, dirs };
+}
+
+/**
+ * 列出某个目录下面所有子文件夹（递归，默认 6 层、最多 500 个）。
+ * 归档弹层用它给用户勾选「要重排哪几个文件夹」—— 只列目录，不读图片，很快。
+ */
+async function apiSubdirs(q) {
+  const dir = asDir(q.get('path'));
+  const maxDepth = Math.min(Math.max(Number(q.get('depth')) || 6, 1), 10);
+  const list = [];
+  const queue = [{ d: dir, rel: '', depth: 0 }];
+  while (queue.length) {
+    const { d, rel, depth } = queue.shift();
+    let ents = [];
+    try {
+      ents = await fsp.readdir(d, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const e of ents) {
+      if (!e.isDirectory() || isHiddenDir(e.name)) continue;
+      const r = rel ? `${rel}/${e.name}` : e.name;
+      list.push({ name: e.name, rel: r, path: path.join(d, e.name), depth: depth + 1 });
+      if (list.length >= 500) return { ok: true, path: dir, dirs: list, truncated: true };
+      if (depth + 1 < maxDepth) queue.push({ d: path.join(d, e.name), rel: r, depth: depth + 1 });
+    }
+  }
+  return { ok: true, path: dir, dirs: list, truncated: false };
+}
+
+/**
+ * 列一个文件夹里的图片绝对路径，deep=1 时连子文件夹一起。
+ *
+ * 只给「把左边文件夹拖到右边相册」用：拖拽上传不需要体积/标签，一次 readdir
+ * 拿完就走，USB 机械盘上也不会因为逐张 stat 而卡住。
+ */
+async function apiImages(q) {
+  const dir = asDir(q.get('path'));
+  const deep = q.get('deep') === '1';
+  const max = Math.min(Math.max(Number(q.get('max')) || 4000, 1), 20000);
+  const out = [];
+  let truncated = false;
+  const queue = [dir];
+  let guard = 0;
+  while (queue.length && !truncated) {
+    const d = queue.shift();
+    if (guard > 3000) break; // 目录数兜底，别被奇怪的结构拖死
+    guard += 1;
+    let ents;
+    try {
+      ents = await fsp.readdir(d, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const e of ents) {
+      if (e.isDirectory()) {
+        if (deep && !isHiddenDir(e.name)) queue.push(path.join(d, e.name));
+        continue;
+      }
+      if (e.name.startsWith('.') || !IMAGE_EXT.has(path.extname(e.name).toLowerCase())) continue;
+      if (out.length >= max) { truncated = true; break; }
+      out.push(path.join(d, e.name));
+    }
+  }
+  out.sort((a, b) => collator.compare(a, b));
+  return { ok: true, path: dir, name: path.basename(dir) || dir, count: out.length, truncated, files: out };
+}
+
+/**
+ * 评分页的「上一层 / 本层图片数 / 子文件夹」。
+ * 子文件夹带上本层图片数，让用户一眼知道哪个还没评；只 readdir，不 stat。
+ */
+async function apiScoreDirs(q) {
+  const dir = asDir(q.get('dir'));
+  let ents = [];
+  try {
+    ents = await fsp.readdir(dir, { withFileTypes: true });
+  } catch {
+    return { ok: false, error: '读不了这个文件夹' };
+  }
+  let files = 0;
+  const subs = [];
+  for (const e of ents) {
+    if (e.isDirectory()) {
+      if (isHiddenDir(e.name) || subs.length >= 300) continue;
+      subs.push({ name: e.name, path: path.join(dir, e.name), count: 0 });
+    } else if (e.isFile() && !e.name.startsWith('.') && IMAGE_EXT.has(path.extname(e.name).toLowerCase())) {
+      files += 1;
+    }
+  }
+  for (const s of subs) {
+    try {
+      const list = await fsp.readdir(s.path, { withFileTypes: true });
+      s.count = list.filter((x) => x.isFile() && !x.name.startsWith('.') && IMAGE_EXT.has(path.extname(x.name).toLowerCase())).length;
+    } catch { s.count = 0; }
+  }
+  subs.sort((a, b) => collator.compare(a.name, b.name));
+  const parent = path.dirname(dir);
+  return { ok: true, dir, parent: parent === dir ? null : parent, name: path.basename(dir) || dir, files, dirs: subs };
 }
 
 /**
@@ -783,17 +1132,60 @@ async function apiIdentify(body) {
   const buffer = await fsp.readFile(file);
   const ext = path.extname(file).toLowerCase();
   const mime = ext === '.png' ? 'image/png' : ext === '.webp' ? 'image/webp' : 'image/jpeg';
-  const img = {
+  const out = await identifyImage({
     buffer,
     mime,
     filename: path.basename(file),
     // 前端用 canvas 压好的副本：多识要 ≤640，植物智只收 JPEG
     small: body.dataSmall ? Buffer.from(body.dataSmall, 'base64') : null,
     jpeg: body.dataJpeg ? Buffer.from(body.dataJpeg, 'base64') : null,
+    sources: body.sources,
+  });
+  return { ...out, file, name: path.basename(file) };
+}
+
+/**
+ * 「自然在线」相册里的照片走这里：图不在本机，先用带令牌的代理把原图取回来，
+ * 再走和本地图片完全一样的一套识别。前端同样会把 640 / 1600 两个副本一起带上。
+ */
+async function apiIdentifyRemote(body) {
+  const url = String(body.url || '').trim();
+  if (!url) throw bad('没有图片地址');
+  const got = await NAT.fetchImage(url);
+  const out = await identifyImage({
+    buffer: got.buffer,
+    mime: got.contentType,
+    filename: body.name || 'online.jpg',
+    small: body.dataSmall ? Buffer.from(body.dataSmall, 'base64') : null,
+    jpeg: body.dataJpeg ? Buffer.from(body.dataJpeg, 'base64') : null,
+    sources: body.sources,
+  });
+  return { ...out, url, name: body.name || '' };
+}
+
+/** 真正的识别：本地文件和站点照片共用这一段 */
+async function identifyImage({ buffer, mime, filename, small, jpeg, sources }) {
+  const img = {
+    buffer,
+    mime,
+    filename,
+    small: small || null,
+    jpeg: jpeg || null,
   };
 
-  const asked = Array.isArray(body.sources) && body.sources.length ? body.sources : presetSources(config.ui?.preset).sources;
-  const keys = asked.filter((k) => SITE_META[k] && !SITE_META[k].verify);
+  const asked = Array.isArray(sources) && sources.length ? sources : presetSources(config.ui?.preset).sources;
+  // 同一个网站的多个模型互斥（多识三分组、懂鸟三类、晓虫各分区、文浩蝶/蛾、百度动/植物）。
+  // 前端已经保证一次只开一个，这里再兜一层，防止旧缓存或直接调接口时把同一站请求两遍。
+  const usedVendor = new Set();
+  const keys = asked
+    .filter((k) => SITE_META[k] && !SITE_META[k].verify)
+    .filter((k) => {
+      const v = SITE_META[k]?.vendor;
+      if (!v) return true;
+      if (usedVendor.has(v)) return false;
+      usedVendor.add(v);
+      return true;
+    });
   if (!keys.length) throw bad('没有可用的识别站点，请先选一个方案或填好账号');
 
   // 需要账号的站点：没登录过就先登一次（多识在 identify 内部自己处理）
@@ -803,38 +1195,91 @@ async function apiIdentify(body) {
       .map((k) => sites.login(k).catch(() => {})),
   );
 
+  // 同一引擎的站点（文浩识蛾 / 识蝶）只真请求一次，另一个直接复用结果 ——
+  // 否则同一份 Top5 会被数两遍票，把并不占优的候选顶上来。
+  const engineOwner = new Map();
+  const plan = keys.map((k) => {
+    const engine = SITE_META[k]?.engine;
+    if (!engine) return { key: k, mirrorOf: '' };
+    if (engineOwner.has(engine)) return { key: k, mirrorOf: engineOwner.get(engine) };
+    engineOwner.set(engine, k);
+    return { key: k, mirrorOf: '' };
+  });
+
   const started = Date.now();
   const results = {};
-  await Promise.all(
-    keys.map(async (k) => {
-      try {
-        results[k] = await sites.identify(k, img);
-      } catch (err) {
-        results[k] = { site: k, ok: false, items: [], error: err.message || String(err) };
-      }
-    }),
+  const list = await Promise.all(
+    plan
+      .filter((p) => !p.mirrorOf)
+      .map(async (p) => {
+        try {
+          return { key: p.key, res: await sites.identify(p.key, img) };
+        } catch (err) {
+          return { key: p.key, res: { site: p.key, ok: false, items: [], error: err.message || String(err) } };
+        }
+      }),
   );
+  for (const { key, res } of list) results[key] = res;
+  for (const p of plan) {
+    if (!p.mirrorOf) continue;
+    const src = results[p.mirrorOf] || null;
+    results[p.key] = {
+      site: p.key,
+      ok: !!src?.ok,
+      ms: 0,
+      items: src?.items || [],
+      error: src?.error,
+      mirrorOf: p.mirrorOf,
+    };
+  }
+  // 保持用户勾选的顺序，结果页的站点卡片顺序才可预期
+  const ordered = {};
+  for (const k of keys) if (results[k]) ordered[k] = results[k];
 
-  const agg = aggregate(results);
+  const agg = aggregate(ordered);
+  // 合并结果里的中文名换成《中国生物物种名录》的大陆规范名 —— 内置索引本地查表，
+  // 没命中（名录未收录 / 本来就没有中文名）就保留站点原名，不用空串覆盖。
+  // 覆盖 row.cn 后，下游「结果页展示 + 写回文件名」都自然用上大陆名，无需各改一处。
+  try {
+    COLCN.resolve(agg.rows);
+    // best 是 agg.rows[0] 的引用，cn 已被改；重建一句话结论里的名字
+    agg.verdict = buildVerdict(agg.best, agg.genusConsensus, agg.siteCount);
+  } catch (err) {
+    // 任何异常都不该拖垮识别：中文名不强增强而已
+    console.log(`  [i] 大陆中文名增强失败（不影响识别）：${err && err.message ? err.message : err}`);
+  }
   const bySite = {};
-  for (const [k, r] of Object.entries(results)) {
-    bySite[k] = { ok: !!r.ok, items: (r.items || []).slice(0, 5), error: r.error || '', ms: r.ms || 0 };
+  for (const [k, r] of Object.entries(ordered)) {
+    bySite[k] = {
+      ok: !!r.ok,
+      items: (r.items || []).slice(0, 5),
+      error: r.error || '',
+      ms: r.ms || 0,
+      mirrorOf: r.mirrorOf || '',
+    };
   }
   return {
     ok: true,
-    file,
-    name: path.basename(file),
     ms: Date.now() - started,
+    // sites = 每站明细（原站点 key → {ok, items, error, ms, mirrorOf}）
     sites: bySite,
-    rows: agg.rows.slice(0, 8).map((r) => ({
+    // aggSites = 真正计了票的站点（有结果、且不是同引擎镜像），顺序同用户勾选；
+    // 「完整结果」那张表的列顺序、站数分母都按它，别看 sites 的 key 数
+    aggSites: agg.sites,
+    siteCount: agg.siteCount,
+    // 15 行：完整结果表要，右侧候选列表自己再截前 8
+    rows: agg.rows.slice(0, 15).map((r) => ({
       cn: r.cn,
       latin: r.latin,
       pct: r.pct,
       support: r.support,
+      unanimous: !!r.unanimous,
       bySite: r.bySite,
+      // 学名首词推出来的属，候选悬停时先拿它兜底；科要联网查 taxonomy 才补得上
+      genus: r.genus || '',
     })),
     verdict: agg.verdict,
-    siteCount: agg.siteCount,
+    genusConsensus: agg.genusConsensus,
   };
 }
 
@@ -864,8 +1309,12 @@ async function apiWrite(body) {
 
   let finalPath = file;
   let renamed = false;
+  // 上一轮写进去的学名（改错重标时用来剥旧名、也用来查分类）
+  const prevLatin = (before.keywords || []).find((k) => k && k !== before.title) || '';
   if (body.rename) {
     const label = speciesLabel(cn, latin, body.renamePick);
+    const only = body.renameOrder === 'only';
+    const renameOrder = only ? 'only' : body.renameOrder === 'last' ? 'last' : 'first';
     const ext = path.extname(file);
     // 基于「最初的名字」拼，而不是当前名字：连着改几次标也不会越叠越长。
     // 老文件里没记原始名的，退到当前文件名。
@@ -873,8 +1322,7 @@ async function apiWrite(body) {
     const origExt = path.extname(origName);
     const base = path.basename(origName, origExt) || path.basename(file, ext);
     // 把上一轮写进去的旧物种名也一起剥掉，改错重标时不留残渣
-    const prevLatin = (before.keywords || []).find((k) => k && k !== before.title) || '';
-    const nextBase = buildName(base, [label, before.title, prevLatin], body.renameOrder === 'last' ? 'last' : 'first');
+    const nextBase = buildName(base, [label, before.title, prevLatin], renameOrder, only ? body.renameSuffix : '');
     if (nextBase && nextBase !== path.basename(file, ext)) {
       let target = path.join(path.dirname(file), `${nextBase}${ext}`);
       // 只是大小写不同 = 同一个文件，Windows 上 existsSync 会误判成重名
@@ -885,7 +1333,7 @@ async function apiWrite(body) {
           renamed = true;
         }
       } else {
-        target = uniquePath(target);
+        target = only ? uniquePathNumbered(target) : uniquePath(target);
         fs.renameSync(file, target);
         finalPath = target;
         renamed = true;
@@ -893,20 +1341,23 @@ async function apiWrite(body) {
     }
   }
 
-  // 归档：写完之后把文件挪进「物种名」子文件夹。挪之前已经把标签写进像素文件本身，
+  // 归档：写完之后把文件挪进「界/门/纲/目/科/属」分类文件夹。挪之前已经把标签写进像素文件本身，
   // 所以就算移动失败，标注也不会丢。
   let archived = false;
   let folder = '';
   if (body.archive) {
-    const label = speciesFolder(cn, latin);
-    if (label) {
+    const species = speciesFolder(cn, latin);
+    if (species) {
       try {
-        const mv = moveIntoSpeciesDir(finalPath, rootDir, label);
+        const latinForTaxo = latin || pickLatin(before.keywords) || prevLatin;
+        const rec = await lookupTaxonomy(latinForTaxo, cn);
+        // 写入时自动归档沿用「到属」：每个种单独成夹是「按分类归档」里的可选项，这里不默认开
+        const mv = moveIntoDir(finalPath, rootDir, archiveSegments(rec, { cn, latin, species }, false));
         if (mv.moved) {
           finalPath = mv.path;
           archived = true;
-          folder = mv.folder;
         }
+        folder = mv.folder;
       } catch (err) {
         // 归档失败不该让整次标注算失败：标签已经写进去了，只是没搬动
         folder = `移动失败：${err.message}`;
@@ -993,6 +1444,50 @@ function splitNameFields(label) {
   const latin = kws.find(isLatin) || (isLatin(title) ? title : '');
   const cn = kws.find((k) => !isLatin(k)) || (isLatin(title) ? '' : title);
   return { cn, latin };
+}
+
+/* ---------------- 文件名里的物种名（很多图还没写标签，名字只在文件名上） ----------------
+ * 验收照片常见的几种写法：
+ *   东亚豆粉蝶(Colias poliographus)_441A8990   中文名(拉丁名)_编号
+ *   卷蛾科(Tortricidae)_204515               (科名单词)
+ *   平爪鳃金龟属(Ectinohoplia)_441A8045       (属名单词)
+ *   八字地老虎(Xestia c-nigrum)_204330       种加词带连字符
+ *   Argyresthia subreticulata_205118         拉丁名_编号
+ *   豹弄蝶 thymelicus leoninus                中文名 斜写学名（属名可能小写）
+ * 判据和前端「没有学名」筛选保持一致：括号里有拉丁词就算；否则要相邻两个拉丁词。
+ * 认不出拉丁名就返回空 —— 纯中文名（如「棕翅肖斑背天牛」）和相机默认名（IMG_/DSC/picture_）
+ * 都算「没有学名」。
+ */
+const LATIN_WORD_RE = /[A-Za-z][A-Za-z-]{2,}/;
+const PAREN_GROUP_RE = /[（(][^（()）]*[)）]/g;
+
+function nameFieldsFromFile(name) {
+  const base = String(name || '').replace(/\.[^.]+$/, '').trim();
+  let latin = '';
+  // ① 括号里的拉丁名（中文名(拉丁名)，或单科/属/目名单词）
+  const groups = base.match(PAREN_GROUP_RE) || [];
+  for (const g of groups) {
+    const inner = g.replace(/^[（(]/, '').replace(/[)）]$/, '').trim();
+    if (LATIN_WORD_RE.test(inner)) {
+      latin = inner;
+      break;
+    }
+  }
+  // ② 括号外相邻的两个拉丁词（属名 + 种加词，允许连字符/小写属名）
+  if (!latin) {
+    const m = base.match(/(?:^|[^A-Za-z-])([A-Za-z][A-Za-z-]{2,})\s+([a-z][A-Za-z-]{1,})/);
+    if (m) latin = `${m[1]} ${m[2]}`;
+  }
+  // ③ 中文名后面紧跟一个拉丁属名（只到属也算鉴定过）：邻烁甲Plesiophthalmus (2)
+  //    归档后每个属一个文件夹，里面大量是这种写法，漏了它们就不认了。
+  if (!latin) {
+    const m = base.match(/[\u4e00-\u9fa5][\s]*([A-Z][a-z]{2,})(?=$|[\s\d（()）.,;])/);
+    if (m) latin = m[1];
+  }
+  if (!latin) return { cn: '', latin: '' };
+  // 中文名：去掉括号拉丁段后剩下的连续中文
+  const cnMatch = base.replace(PAREN_GROUP_RE, ' ').match(/[\u4e00-\u9fa5·]{2,}/);
+  return { cn: cnMatch ? cnMatch[0] : '', latin };
 }
 
 /**
@@ -1125,54 +1620,300 @@ async function apiExport(body) {
   };
 }
 
+/* ---------------- 递归扫描与「已归档」判定 ---------------- */
+
+// 一次最多处理这么多张：重排常常整棵树几十万个文件，宁可分批让用户自己切，
+// 也不要在 USB 机械盘上卡住十分钟还不给反馈。
+const MAX_ARCHIVE_FILES = 30000;
+
+/** child 是否在 parent 里面（含自身），比较时统一小写 —— Windows 路径不分大小写 */
+function isUnder(child, parent) {
+  const c = path.resolve(child).toLowerCase();
+  const p = path.resolve(parent).toLowerCase();
+  return c === p || c.startsWith(p + path.sep);
+}
+
 /**
- * 批量归档：把这个文件夹里「已标注」的图片按物种名分进子文件夹。
- * 默认只算不动手（preview），前端确认后再带 apply:true 回来 —— 移动文件是不可逆的，
+ * 这个文件是不是已经躺在「界/门/纲/目/科/属」这串分类目录里了。
+ *
+ * 用「整条路径里是否存在连续的这几级」来判，而不是只看最后几级：
+ * 用户可能选的是树中间的某一层（比如 .../动物界 Animalia/节肢动物门 Arthropoda），
+ * 这时文件本身已经在归档结构里，再归档一次只会套娃成 .../节肢动物门 Arthropoda/动物界 Animalia/…，
+ * 所以只要路径里已经出现过这条分类链，就认定「已归档」，不参与重排。
+ */
+function dirHasSegments(dirPath, segs) {
+  const want = (Array.isArray(segs) ? segs : [segs]).map((s) => safeName(s).toLowerCase()).filter(Boolean);
+  if (!want.length) return false;
+  const have = path.resolve(dirPath).split(path.sep).map((s) => s.toLowerCase());
+  for (let i = 0; i + want.length <= have.length; i += 1) {
+    let hit = true;
+    for (let j = 0; j < want.length; j += 1) {
+      if (have[i + j] !== want[j]) {
+        hit = false;
+        break;
+      }
+    }
+    if (hit) return true;
+  }
+  return false;
+}
+
+/**
+ * 递归收图片。返回绝对路径数组；到上限就停（truncated 由调用方看长度判断）。
+ * 用同步 IO：归档是用户主动触发的一步操作，宁可整段跑完也不要和缩略图请求抢盘。
+ */
+function walkImageFiles(root, maxDepth) {
+  const out = [];
+  const stack = [{ dir: root, depth: 0 }];
+  while (stack.length) {
+    const { dir, depth } = stack.pop();
+    let ents;
+    try {
+      ents = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const e of ents) {
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) {
+        if (depth >= maxDepth || isHiddenDir(e.name)) continue;
+        stack.push({ dir: full, depth: depth + 1 });
+      } else if (e.isFile()) {
+        if (e.name.startsWith('.')) continue;
+        if (!IMAGE_EXT.has(path.extname(e.name).toLowerCase())) continue;
+        out.push(full);
+        if (out.length >= MAX_ARCHIVE_FILES) return out;
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * 批量归档 / 重排：把「已命名」的图片按 界/门/纲/目/科/属 分进分类文件夹
+ * （同属的物种进同一个属文件夹，文件夹名「中文 拉丁」）。
+ *
+ * 三个模式：
+ *   ① 默认：只处理 path 这一层（原来的行为）。
+ *   ② deep:true：连子文件夹一起扫，全部重排到 path 下的分类树里。
+ *   ③ folders:[..]：只重排勾选的那几个文件夹（含它们自己的子文件夹）。
+ * 另外 files:[..] 只处理点名的这几张（界面上勾选的图片），不再扫目录。
+ *
+ * 无论哪种模式，**已经归档过的图片都不参与重排**（见 dirHasSegments），
+ * 所以可以反复点，不会越搬越深。
+ *
+ * 默认只算不动手（preview），前端确认后再带 apply:true 回来 —— 移动文件不可逆，
  * 不能让用户点错一下就搬走一整批照片。
  */
-async function apiArchive(body) {
+/* ---------------- 归并任务（带进度回报，避免大批量移动卡死界面） ---------------- */
+
+const ARCH_JOBS = new Map();
+
+function startArchiveJob(body) {
+  const id = 'a' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+  const job = { id, phase: 'queued', total: 0, done: 0, startedAt: 0, finished: false, result: null, error: null };
+  ARCH_JOBS.set(id, job);
+  (async () => {
+    try {
+      const r = await apiArchive(body, (p) => {
+        if (p.phase) job.phase = p.phase;
+        if (p.total != null) job.total = p.total;
+        if (p.done != null) job.done = p.done;
+      });
+      job.phase = 'done';
+      job.result = r;
+    } catch (e) {
+      job.phase = 'error';
+      job.error = e && e.message ? e.message : String(e);
+    }
+    job.finished = true;
+    job.total = job.total || 0;
+  })();
+  return id;
+}
+
+function getArchiveJob(id) {
+  const job = ARCH_JOBS.get(id);
+  if (!job) return { ok: false, error: '任务不存在或已结束' };
+  const out = { ok: true, id: job.id, phase: job.phase, total: job.total, done: job.done, finished: job.finished };
+  if (job.finished) {
+    if (job.error) out.error = job.error;
+    else out.result = job.result;
+    ARCH_JOBS.delete(id); // 取过最终结果就销毁，不占内存
+  }
+  return out;
+}
+
+async function apiArchive(body, onProgress) {
   const dir = asDir(body.path);
   const apply = body.apply === true;
+  const deep = body.deep === true;
+  // 每个种一个文件夹（否则同属一个文件夹，默认）
+  const bySpecies = body.bySpecies === true;
+  const picked = Array.isArray(body.folders) ? body.folders.filter((x) => typeof x === 'string' && x.trim()) : [];
+  const chosen = Array.isArray(body.files) ? body.files.filter((x) => typeof x === 'string' && x.trim()) : [];
 
-  let ents = [];
-  try {
-    ents = fs.readdirSync(dir, { withFileTypes: true });
-  } catch {
-    throw bad('读不了这个文件夹');
+  // 目标根目录：默认就是当前目录（就地归档）。指定到别处就是「归并」——
+  // 把散落在各个文件夹里的照片统一收进同一棵分类树。
+  const dest = body.dest ? asDir(body.dest) : dir;
+  const toOther = path.resolve(dest).toLowerCase() !== path.resolve(dir).toLowerCase();
+  // 复制只在「搬到另一个目录」时才有意义：就地复制等于在自己下面再放一份，纯属噪音
+  const copyMode = body.copy === true && toOther;
+  const includeOwn = body.includeOwn === true;
+
+  // 扫描起点：点名的图片（界面勾选）> 勾选文件夹（含其子目录）> 递归当前目录 > 只当前目录
+  let roots = [dir];
+  let recursive = deep;
+  let files = [];
+  if (chosen.length) {
+    // 只动用户勾中的那几张：不再扫目录，别把同文件夹其它的图一起搬走
+    for (const p of chosen) {
+      let f;
+      try {
+        f = asImage(p);
+      } catch {
+        continue;
+      }
+      if (!isUnder(f, dir)) continue;
+      files.push(f);
+    }
+    if (!files.length) throw bad('勾选的图片不在当前目录里');
+    recursive = false;
+  } else if (picked.length) {
+    roots = [];
+    for (const p of picked) {
+      let r;
+      try {
+        r = asDir(p);
+      } catch {
+        continue;
+      }
+      // 只认当前目录里面的，防止前端传错路径把别处的照片搬过来
+      if (!isUnder(r, dir)) continue;
+      roots.push(r);
+    }
+    if (!roots.length) throw bad('勾选的文件夹不在当前目录里');
+    recursive = true;
   }
 
+  if (!files.length) {
+    for (const r of roots) files = files.concat(recursive ? walkImageFiles(r, 12) : walkImageFilesShallow(r));
+    // 「含本层图片」：只加当前目录自己的图，不往下走（下面那些由勾选的文件夹负责）
+    if (includeOwn) files = files.concat(walkImageFilesShallow(dir));
+  }
+  const truncated = !chosen.length && files.length >= MAX_ARCHIVE_FILES;
+
   const todo = [];
-  const skip = [];
-  const groups = new Map();
-  for (const e of ents) {
-    if (!e.isFile() || e.name.startsWith('.')) continue;
-    if (!IMAGE_EXT.has(path.extname(e.name).toLowerCase())) continue;
-    const full = path.join(dir, e.name);
-    let label;
+  let skipped = 0;
+  if (onProgress) onProgress({ phase: '扫描与读取标签', total: files.length, done: 0 });
+  let scanIdx = 0;
+  for (const full of files) {
+    scanIdx += 1;
+    // 每 50 张让出一次事件循环：读标签是同步 IO，不 yield 的话轮询接口读不到进度
+    if (onProgress && scanIdx % 50 === 0) {
+      onProgress({ done: scanIdx });
+      await new Promise((r) => setImmediate(r));
+    }
+    let label = null;
     try {
       label = IMG.readLabel(full);
     } catch {
-      skip.push(e.name);
+      skipped += 1;
       continue;
     }
-    const kw = (label.keywords || []).filter((k) => k !== label.title);
-    const name = speciesFolder(label.title, kw[0] || '');
-    if (!name) {
-      skip.push(e.name);
+    // 先看写进图的标签；没有标签就退回文件名 —— 很多人的图从相机/别的软件出来时就叫
+    // 「东亚豆粉蝶(Colias poliographus)_441A8990」，文件名本身就是鉴定证据。
+    let { cn, latin } = splitNameFields(label || {});
+    if (!cn && !latin) {
+      const f = nameFieldsFromFile(path.basename(full));
+      cn = f.cn;
+      latin = f.latin;
+    }
+    const species = speciesFolder(cn, latin);
+    if (!species) {
+      skipped += 1;
       continue;
     }
-    groups.set(name, (groups.get(name) || 0) + 1);
-    todo.push({ file: full, name });
+    todo.push({ file: full, species, cn, latin: latin || pickLatin(label?.keywords) });
+  }
+
+  // 分类阶元：同一学名只查一次（lib/taxonomy.js 里还有落盘缓存，查过就不联网）。
+  // 这一步可能要几秒（首次），之后全走缓存。
+  // 查分类这一步没法细分进度（批量联网），用不确定进度条表示
+  if (onProgress) onProgress({ phase: '查询分类（首次要联网）', total: 0, done: 0 });
+  const taxo = await TAXO.resolve(todo.map((t) => ({ latin: t.latin, cn: t.cn || t.species })));
+
+  const move = [];
+  const groups = new Map();
+  let unknown = 0;
+  let already = 0;
+  let exists = 0;
+  for (const t of todo) {
+    const rec = taxo.get(taxoKey(t.latin, t.cn || t.species));
+    t.segs = archiveSegments(rec, t, bySpecies);
+    if (t.segs[0] === '未分类') unknown += 1;
+    if (toOther) {
+      // 归并到别的树：目标位置已有同名同大小的，就认为这份已经搬过了，不重复弄一份
+      const target = path.join(dest, ...t.segs.map(safeName), path.basename(t.file));
+      try {
+        if (fs.statSync(target).size === fs.statSync(t.file).size) {
+          exists += 1;
+          continue;
+        }
+      } catch {}
+    } else if (dirHasSegments(path.dirname(t.file), t.segs)) {
+      // 已经在这一串分类文件夹里了 —— 不重复搬，也不算进「将搬动」
+      already += 1;
+      continue;
+    }
+    move.push(t);
+    const key = t.segs.join('/');
+    groups.set(key, (groups.get(key) || 0) + 1);
   }
 
   let moved = 0;
+  let copied = 0;
+  let pruned = 0;
   const failed = [];
   if (apply) {
-    for (const t of todo) {
+    if (onProgress) onProgress({ phase: copyMode ? '复制中' : '移动中', total: move.length, done: 0 });
+    const emptied = new Set();
+    let processed = 0;
+    for (const t of move) {
+      const from = path.dirname(t.file);
       try {
-        if (moveIntoSpeciesDir(t.file, dir, t.name).moved) moved += 1;
+        if (copyMode) {
+          if (copyIntoDir(t.file, dest, t.segs).copied) copied += 1;
+        } else if (moveIntoDir(t.file, dest, t.segs).moved) {
+          moved += 1;
+          if (toOther || from.toLowerCase() !== path.resolve(dir).toLowerCase()) emptied.add(from);
+        }
       } catch (err) {
         failed.push(`${path.basename(t.file)}：${err.message}`);
+      }
+      processed += 1;
+      // 每 25 张让出事件循环，否则大目录移动时进度条会卡在 0 直到全部完成
+      if (onProgress && processed % 25 === 0) {
+        onProgress({ done: processed });
+        await new Promise((r) => setImmediate(r));
+      }
+    }
+    if (onProgress) onProgress({ done: processed });
+    // 搬空的旧文件夹顺手删掉（rmdir 只删空目录，非空一律失败，所以不会误伤）。
+    // 复制不动源文件夹，所以只有移动模式才清。
+    if (!copyMode) {
+      const root = path.resolve(dir).toLowerCase();
+      for (const d of [...emptied].sort((a, b) => b.length - a.length)) {
+        let cur = d;
+        while (!isHiddenDir(path.basename(cur)) && path.resolve(cur).toLowerCase() !== root) {
+          try {
+            fs.rmdirSync(cur);
+            pruned += 1;
+          } catch {
+            break;
+          }
+          cur = path.dirname(cur);
+        }
       }
     }
   }
@@ -1180,171 +1921,424 @@ async function apiArchive(body) {
   return {
     ok: true,
     applied: apply,
-    willMove: todo.length,
+    deep: recursive,
+    bySpecies,
+    dest,
+    copy: copyMode,
+    mode: chosen.length ? 'files' : recursive ? (picked.length ? 'folders' : 'deep') : 'dir',
+    scanned: files.length,
+    truncated,
+    willMove: move.length,
     moved,
+    copied,
+    pruned,
     failed,
-    skipped: skip.length,
+    skipped,
+    // 已经在分类文件夹里、这次不参与重排的张数
+    already,
+    // 归并时目标位置本来就有的张数
+    exists,
+    species: new Set(move.map((t) => t.species)).size,
+    // 查不到分类、只能落到「未分类」的张数
+    unknown,
     groups: [...groups.entries()]
       .map(([name, count]) => ({ name, count }))
       .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, 'zh')),
   };
 }
 
-/* ---------------- 和聚合台联动 ---------------- */
-
-/**
- * 聚合台的端口。
- *
- * 用户很可能是在别的文件夹里双击聚合台的 exe，也可能同时开着一个源码版，
- * 端口不一定是 8791，所以这里按常见端口挨个探（并行，各自 800ms 超时，总共不到 1 秒）。
- * `--hub 8900` 明确指定了就只认那一个 —— 调试时不要被别的实例串了。
- */
-const HUB_PORTS = (() => {
-  const i = process.argv.indexOf('--hub');
-  const fixed = i > -1 ? Number(process.argv[i + 1]) : 0;
-  return fixed ? [fixed] : [8791, 8899, 8792];
-})();
-const HUB_HOME_DEFAULT = `http://127.0.0.1:${HUB_PORTS[0]}`;
-
-/** 聚合台发布清单。装不上聚合台的人点「下载」时，用它换出当前版本的 exe 直链 */
-const HUB_MANIFEST = (process.env.TAGDEN_HUB_MANIFEST || 'https://bioidhub-fsw.oss-cn-hangzhou.aliyuncs.com/latest.json').trim();
-
-/** 命中的实例缓存 10 秒：连点两下按钮不用探两遍 */
-let HUB_HIT = { at: 0, value: null };
-
-async function probeHubPort(port) {
-  const home = `http://127.0.0.1:${port}`;
+/** 只扫一层：非递归模式用，行为和原来的归档完全一致 */
+function walkImageFilesShallow(dir) {
+  let ents = [];
   try {
-    const r = await fetch(`${home}/api/status`, { signal: AbortSignal.timeout(800) });
-    if (!r.ok) return { ok: false, port, reason: `HTTP ${r.status}` };
-    const j = await r.json();
-    const app = j.app || {};
-    return {
-      ok: true,
-      port,
-      home,
-      name: app.name || '物种聚合台',
-      version: app.version || '',
-      openLocalImage: !!app.openLocalImage,
-      // 认 ?sites=a,b,c 精确模型清单（1.0.40 起）。老版本只认 ?group=，那就退回按类群切
-      openLocalSites: !!app.openLocalSites,
-      // 认 postMessage 送图（1.0.44 起）：已经开着那一页时就不用再开新标签页
-      acceptImageMessage: !!app.acceptImageMessage,
-      sites: Array.isArray(j.sites) ? j.sites.map((s) => s.key).filter(Boolean) : [],
-    };
+    ents = fs.readdirSync(dir, { withFileTypes: true });
   } catch {
-    return { ok: false, port, reason: '连不上' };
+    throw bad('读不了这个文件夹');
   }
+  const out = [];
+  for (const e of ents) {
+    if (!e.isFile() || e.name.startsWith('.')) continue;
+    if (!IMAGE_EXT.has(path.extname(e.name).toLowerCase())) continue;
+    out.push(path.join(dir, e.name));
+  }
+  return out;
 }
 
-/** 探一下聚合台起没起、在哪个端口、是不是认 ?img= 的新版 */
-async function hubProbe() {
-  if (HUB_HIT.value && Date.now() - HUB_HIT.at < 10000) return HUB_HIT.value;
-  const hits = await Promise.all(HUB_PORTS.map(probeHubPort));
-  const ok = hits.find((h) => h.ok);
-  if (ok) {
-    HUB_HIT = { at: Date.now(), value: ok };
-    return ok;
-  }
-  return { ok: false, tried: HUB_PORTS, error: `聚合台没在运行（试了 ${HUB_PORTS.map((p) => `127.0.0.1:${p}`).join('、')}）` };
-}
-
-/**
- * 聚合台最新版的下载信息：读它的清单，拼出**这台机器上能直接装的那一份**的绝对直链。
+/* ---------------- 自然在线（nature-client 作为标注工坊的一个模块） ----------------
  *
- * Windows 给 exe（固定别名 bio-id-hub-win.exe，永远指向最新版，群发文案里贴一次就够）；
- * macOS 按芯片给 arm64 / x64 的 zip（也是固定名）。
- * 拿不到就回 null —— 界面上就只说「联系作者」，绝不给一个 404 链接。
+ * 这一段是「另一个软件变成这里的一个标签页」的胶水层，真正干活的是 lib/nature-client.js
+ * （从 nature-client 项目原样拷过来，只依赖 lib/http.js），账号与令牌由 lib/nature-store.js 管。
+ *
+ * 分工，别越界：
+ *   · 识别还是走 lib/adapters.js 里的 xingse 适配器 —— 那是「传图换候选物种」；
+ *   · 这里管的是**账号里的相册**：新建、上传、浏览、批量下载、删除。
+ * 两者共用同一个账号，但互不干涉。
+ *
+ * 一条硬规则：账号密码和令牌绝不出本机。浏览器只跟 127.0.0.1 的这一层说话，
+ * 图片也走本机代理（/api/nat/img）—— 直连站点会同时撞上 CORS、防盗链和令牌泄露。
  */
-let HUB_DL = { at: 0, value: null };
 
-function headOk(url) {
-  return fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(1500) }).then(
-    (r) => r.ok,
-    () => false,
-  );
-}
+const NAT_JOBS = new Map();
 
-async function hubDownloadInfo() {
-  const ttl = HUB_DL.value ? 10 * 60 * 1000 : 60 * 1000;
-  if (Date.now() - HUB_DL.at < ttl) return HUB_DL.value;
-
-  const mac = process.platform === 'darwin';
-  const arch = process.arch === 'arm64' ? 'arm64' : 'x64';
-  // mac 的清单是 latest-mac.json（只描述 main.js），版本号两边同步，取它只是为了不张冠李戴
-  const manifestUrl = mac ? HUB_MANIFEST.replace(/latest(-mac)?\.json$/i, 'latest-mac.json') : HUB_MANIFEST;
-
-  try {
-    const r = await fetch(manifestUrl, { signal: AbortSignal.timeout(2500) });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const m = await r.json();
-    if (!m || !m.version) throw new Error('清单里没有 version');
-
-    const base = new URL(manifestUrl).origin;
-    const stable = mac ? `${base}/bio-id-hub-mac-${arch}.zip` : `${base}/bio-id-hub-win.exe`;
-    // 固定别名没传过（老发布）就退回清单里那个带版本号的文件
-    const fallback = m.url ? new URL(String(m.url), manifestUrl).href : '';
-    const url = (await headOk(stable)) ? stable : fallback;
-    if (!url) throw new Error('没有可用的下载地址');
-
-    const info = {
-      version: String(m.version || ''),
-      // mac 的清单记的是 main.js 的大小，不是 zip 的；宁可不显示也别报个错的
-      size: mac ? 0 : Number(m.size) || 0,
-      pubDate: String(m.pubDate || ''),
-      url,
-      kind: mac ? 'zip' : 'exe',
-      arch: mac ? arch : '',
-    };
-    HUB_DL = { at: Date.now(), value: info };
-    return info;
-  } catch {
-    HUB_DL = { at: Date.now(), value: null };
-    return null;
+/** 图片代理：带 referer + Bearer 取回来，落盘缓存（同一个 URL 只联一次网） */
+async function serveNatureImage(req, res, q) {
+  const u = String(q.get('u') || '');
+  if (!u.startsWith(NAT.SITE_BASE + '/')) throw bad('非法的图片地址');
+  const fp = NAT.imgCachePath(u);
+  if (q.get('refresh') !== '1') {
+    try {
+      const buf = fs.readFileSync(fp);
+      if (buf.length) {
+        res.writeHead(200, {
+          'content-type': NAT.IMG_TYPES[NAT.imgExt(u)] || 'image/jpeg',
+          'content-length': buf.length,
+          'cache-control': 'private, max-age=86400',
+        });
+        return res.end(buf);
+      }
+    } catch {
+      /* 没缓存就去联网 */
+    }
   }
+  const { buffer, contentType } = await NAT.fetchImage(u);
+  try {
+    fs.mkdirSync(path.dirname(fp), { recursive: true });
+    fs.writeFileSync(fp, buffer);
+  } catch {
+    /* 缓存写不进去不影响返回 */
+  }
+  res.writeHead(200, { 'content-type': contentType, 'content-length': buffer.length, 'cache-control': 'private, max-age=86400' });
+  return res.end(buffer);
 }
 
 /**
- * 「在聚合台查看这张」的链接。
- * 不光把图送过去，还要把两样东西一起带过去：
- *   group —— 这批照片是什么类群，不然聚合台会拿上次留下的模型（比如植物）跑昆虫照片；
- *   sites —— 标注工坊里现在**开着哪几个模型**，聚合台照着开，两边的结论才对得上。
- * 同站互斥和类群互斥交给聚合台自己压（它最清楚哪些能同时开），这里原样送过去。
+ * 上传任务：串行 + 进度回调。
+ *
+ * 为什么必须后台跑：一批几十张、每张走一次 multipart 上传，同步做的话前端只能干等，
+ * 中途也没有任何反馈。和归档任务同一个套路（ARCH_JOBS），前端轮询读进度。
+ *
+ * 两种模式：
+ *   album    —— 全部进同一个相册（用户在界面上选好的）
+ *   species  —— 按图片标签里的物种名各建一个相册（「确认完物种就归档到物种名相册」）
+ *              没有物种名的图跳过并记进 skipped，不静默丢。
  */
-const PRESET_TO_GROUP = { insect: 'insect', plant: 'plant', bird: 'bird', fungi: 'fungi', herp: 'herp' };
-
-async function apiHubLink(q) {
-  const file = asImage(q.get('path'));
-  const hub = await hubProbe();
-  if (!hub.ok) {
-    // 装上聚合台这件事不该让整个功能「报错就完了」：告诉用户为什么、去哪拿、怎么回来
-    const err = bad('这一步要先装「物种鉴定聚合台」', 503);
-    err.payload = { code: 'HUB_DOWN', tried: hub.tried, download: await hubDownloadInfo() };
-    throw err;
-  }
-  if (!hub.openLocalImage) {
-    const err = bad(`聚合台 v${hub.version || '?'} 还不支持从外部打开本地图片，升到最新版就有了`, 409);
-    err.payload = { code: 'HUB_OLD', hub: { port: hub.port, version: hub.version }, download: await hubDownloadInfo() };
-    throw err;
-  }
-  // 显式传 group 就听它的；否则用当前预置方案。auto 不带类群，保持聚合台原样
-  const asked = String(q.get('group') || '').trim();
-  const group = asked || PRESET_TO_GROUP[config.ui?.preset] || '';
-  const preset = PRESETS.find((p) => p.key === config.ui?.preset);
-  // 参与识别的模型（已按「有没有配好账号」过滤过），老版本聚合台不认这个参数就不带
-  const carried = hub.openLocalSites ? presetSources(config.ui?.preset).sources : [];
-  const qs = new URLSearchParams({ img: file });
-  if (group) qs.set('group', group);
-  if (carried.length) qs.set('sites', carried.join(','));
-  return {
-    ok: true,
-    url: `${hub.home}/?${qs.toString()}`,
-    hub,
-    file,
-    group,
-    groupName: group ? preset?.name || group : '',
-    sites: carried,
+function startNatUpload({ files, mode, albumId }) {
+  const id = 'n' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+  const job = {
+    id,
+    phase: 'running',
+    mode,
+    total: files.length,
+    done: 0,
+    ok: 0,
+    current: '',
+    failed: [],
+    skipped: [],
+    albums: [],
+    finished: false,
+    error: null,
   };
+  NAT_JOBS.set(id, job);
+
+  (async () => {
+    const X = NAT.client();
+    const albumByName = new Map(); // 物种名 → 相册 id，同一个种只查/建一次
+    try {
+      for (const file of files) {
+        job.current = path.basename(file);
+        try {
+          let target = albumId;
+          if (mode === 'species') {
+            // 标签优先，文件名兜底 —— 和「没有学名」筛选用的是同一套口径
+            const label = (() => {
+              try {
+                return IMG.readLabel(file) || {};
+              } catch {
+                return {};
+              }
+            })();
+            let { cn, latin } = splitNameFields(label);
+            if (!cn && !latin) ({ cn, latin } = nameFieldsFromFile(path.basename(file)));
+            const title = [cn, latin].filter(Boolean).join(' ').trim();
+            if (!title) {
+              job.skipped.push({ file, reason: '没有物种名' });
+              job.done += 1;
+              continue;
+            }
+            target = albumByName.get(title);
+            if (!target) {
+              const r = await X.ensureAlbum(title);
+              target = r.id;
+              albumByName.set(title, target);
+              if (r.created) job.albums.push({ id: target, title });
+            }
+          }
+          const photoId = await X.uploadFile(target, file, { useAI: 0 });
+          job.ok += 1;
+          if (photoId) job.lastPhotoId = photoId;
+        } catch (err) {
+          job.failed.push({ file, error: err && err.message ? err.message : String(err) });
+        }
+        job.done += 1;
+        // 让出事件循环，否则前端轮询永远读到「done 还是 0」
+        await new Promise((r) => setImmediate(r));
+      }
+      job.phase = 'done';
+    } catch (err) {
+      job.phase = 'error';
+      job.error = err && err.message ? err.message : String(err);
+    }
+    job.current = '';
+    job.finished = true;
+    // 拖拽上传的临时文件用完就删，别在缓存里堆一堆重复的图片
+    try {
+      const dirs = new Set(
+        files
+          .filter((f) => f.startsWith(NAT_DROP + path.sep))
+          .map((f) => path.dirname(f)),
+      );
+      for (const d of dirs) fs.rmSync(d, { recursive: true, force: true });
+    } catch {
+      /* 清不掉就算了，下次重启再攒，不影响上传结果 */
+    }
+  })();
+
+  return id;
+}
+
+function getNatUpload(id) {
+  const job = NAT_JOBS.get(id);
+  if (!job) return { ok: false, error: '任务不存在或已结束' };
+  const out = {
+    ok: true,
+    id: job.id,
+    phase: job.phase,
+    mode: job.mode,
+    total: job.total,
+    done: job.done,
+    okCount: job.ok,
+    current: job.current,
+    failed: job.failed.slice(0, 200),
+    skipped: job.skipped.slice(0, 200),
+    albums: job.albums,
+    finished: job.finished,
+  };
+  if (job.error) out.error = job.error;
+  if (job.finished) NAT_JOBS.delete(id); // 取过最终结果就销毁
+  return out;
+}
+
+async function handleNature(req, res, pathname, q) {
+  const X = NAT.client();
+
+  /* 状态：顺带验一下令牌还有没有效 */
+  if (pathname === '/api/nat/status' && req.method === 'GET') {
+    const info = NAT.info();
+    let me = { ok: false, reason: '未登录' };
+    if (info.hasToken) {
+      try {
+        me = await X.check();
+      } catch (err) {
+        me = { ok: false, reason: err.message || String(err) };
+      }
+    }
+    return sendJson(res, 200, {
+      ok: true,
+      loggedIn: !!me.ok,
+      username: me.username || (config.sites && config.sites.xingse && config.sites.xingse.username) || info.username,
+      nickName: me.nickName || '',
+      reason: me.ok ? '' : me.reason || '未登录',
+      host: info.host,
+      central: info.central, // false 表示指的是本地假站点（联调中）
+      hasCreds: info.hasCreds,
+    });
+  }
+
+  if (pathname === '/api/nat/captcha' && req.method === 'GET') {
+    const c = await X.captcha();
+    return sendJson(res, 200, { ok: true, ...c });
+  }
+
+  if (pathname === '/api/nat/login' && req.method === 'POST') {
+    const b = await readJson(req);
+    // 种子不再带自然在线账号：账号密码由用户在登录框里填，随验证码一起上来
+    const u = String(b.username || '').trim();
+    const p = String(b.password || '');
+    if (!u || !p) return sendJson(res, 400, { ok: false, error: '请填写自然在线的账号和密码' });
+    X.setCredentials(u, p);
+    await X.login(b.captcha, b.key);
+    // 这份账号同时也是「识别」模块（xingse 站点）的凭据：登录后把新令牌同步过去，
+    // 两处共用同一个会话，别一边新令牌一边种子里那枚旧的。
+    // 账号密码也落进本机配置（config.json 本来就是加密的），下次令牌失效只要再输验证码。
+    config.sites.xingse = { ...(config.sites.xingse || {}), username: u, password: p, token: X.token, tokenAt: Date.now() };
+    persistConfig();
+    const me = await X.check().catch(() => ({ ok: true }));
+    return sendJson(res, 200, { ok: true, username: me.username || '' });
+  }
+
+  if (pathname === '/api/nat/logout' && req.method === 'POST') {
+    X.logout();
+    // 识别模块和这里用的是同一个账号：退出就连它一起退，并立刻落盘 ——
+    // 不然重启后种子里那枚旧令牌又把两边都顶回登录态（启动时的 NAT.loggedOut() 也会接着压制它）。
+    config.sites.xingse = { ...(config.sites.xingse || {}), token: '', tokenAt: 0 };
+    persistConfig();
+    return sendJson(res, 200, { ok: true });
+  }
+
+  /* 相册 */
+  if (pathname === '/api/nat/albums' && req.method === 'GET') {
+    return sendJson(res, 200, { ok: true, albums: await X.albums() });
+  }
+
+  if (pathname === '/api/nat/albums' && req.method === 'POST') {
+    const b = await readJson(req);
+    const id = await X.addAlbum({ title: b.title, description: b.description || '' });
+    return sendJson(res, 200, { ok: true, id });
+  }
+
+  if (pathname === '/api/nat/albums/delete' && req.method === 'POST') {
+    const b = await readJson(req);
+    await X.deleteAlbum(b.id);
+    return sendJson(res, 200, { ok: true });
+  }
+
+  /* 相册里的照片 */
+  if (pathname === '/api/nat/photos' && req.method === 'GET') {
+    const album = String(q.get('album') || '');
+    if (!album) throw bad('缺少相册 id');
+    const page = Number(q.get('page')) || 1;
+    const size = Number(q.get('size')) || 60;
+    const r = await X.albumPhotos(album, page, size);
+    return sendJson(res, 200, { ok: true, ...r });
+  }
+
+  if (pathname === '/api/nat/photos/delete' && req.method === 'POST') {
+    const b = await readJson(req);
+    const n = await X.deletePhotos(b.ids);
+    return sendJson(res, 200, { ok: true, deleted: n });
+  }
+
+  /* 批量把照片移到另一个相册（站点原生接口，photoId 不变、不重传） */
+  if (pathname === '/api/nat/photos/move' && req.method === 'POST') {
+    const b = await readJson(req);
+    const ids = (Array.isArray(b.ids) ? b.ids : []).map(String).filter(Boolean);
+    if (!ids.length) throw bad('没有选中照片');
+    await X.movePhotos(b.albumId, ids);
+    return sendJson(res, 200, { ok: true, moved: ids.length });
+  }
+
+  /* 拖进来的本机文件：浏览器直接把二进制 POST 上来，落盘后交给已有的上传任务 */
+  if (pathname === '/api/nat/drop-file' && req.method === 'POST') {
+    return sendJson(res, 200, await apiNatDropFile(req, q));
+  }
+
+  if (pathname === '/api/nat/img' && req.method === 'GET') {
+    return serveNatureImage(req, res, q);
+  }
+
+  /* 站点分类库：把「名字」解析成提交鉴定要用的 NameID。
+   * 站点这个接口是 GET + query（不是 POST body），和别处不一样，原独立版已在真站验证过。 */
+  if (pathname === '/api/nat/taxa' && req.method === 'GET') {
+    const taxa = await X.searchTaxa(q.get('keyword') || '', Number(q.get('limit')) || 20);
+    return sendJson(res, 200, { ok: true, taxa });
+  }
+
+  /* 重新鉴定：把工坊里改好的名字写回自然在线网页端，只改鉴定结果、不动原图。
+   * 底层 X.reidentify() 提交的是纯 JSON（photoId + NameID + 中文名/学名），
+   * 图片一个字节都不传；站点收到后覆盖这张照片的鉴定结果，也不会新增照片。
+   * 这和「上传」是两条完全不同的链路：上传 = 新增一张照片。 */
+  if (pathname === '/api/nat/reidentify' && req.method === 'POST') {
+    const b = await readJson(req);
+    const records = Array.isArray(b.records) ? b.records : [];
+    if (!records.length) throw bad('没有要写回的照片');
+    const out = [];
+    for (const rec of records) {
+      const photoId = rec && rec.photoId ? String(rec.photoId) : '';
+      try {
+        if (!photoId) throw new Error('缺少照片 id');
+        const nameId = rec.nameId ? String(rec.nameId) : '';
+        if (!nameId) throw new Error('缺少鉴定 ID（NameID）');
+        const chinese = String(rec.chinese || '').trim();
+        const latin = String(rec.latin || '').trim();
+        if (!chinese && !latin) throw new Error('中文名与学名至少填一项');
+        const r = await X.reidentify({
+          ids: [photoId],
+          nameChinese: chinese,
+          nameLatin: latin,
+          nameId,
+          type: Number(b.type || 1),
+          signature: String(b.signature || ''),
+          description: String(b.description || ''),
+        });
+        out.push({ photoId, ok: true, chinese, latin, data: r && r.data !== undefined ? r.data : true });
+      } catch (err) {
+        out.push({ photoId, ok: false, error: err.message || String(err) });
+      }
+    }
+    return sendJson(res, 200, { ok: true, results: out });
+  }
+
+  /* 对站点上的照片跑识别：图先经代理取回，再走和本地图片一样的识别管线 */
+  if (pathname === '/api/nat/identify' && req.method === 'POST') {
+    return sendJson(res, 200, await apiIdentifyRemote(await readJson(req)));
+  }
+
+  /* 上传（后台任务）*/
+  if (pathname === '/api/nat/upload' && req.method === 'POST') {
+    const b = await readJson(req);
+    const files = (Array.isArray(b.files) ? b.files : []).map((f) => asImage(f));
+    if (!files.length) throw bad('没有要上传的图片');
+    const mode = b.mode === 'species' ? 'species' : 'album';
+    if (mode === 'album' && !b.albumId) throw bad('请先选一个目标相册');
+    const id = startNatUpload({ files, mode, albumId: String(b.albumId || '') });
+    return sendJson(res, 200, { ok: true, jobId: id, total: files.length });
+  }
+
+  if (pathname.startsWith('/api/nat/upload/') && req.method === 'GET') {
+    return sendJson(res, 200, getNatUpload(pathname.slice('/api/nat/upload/'.length)));
+  }
+
+  /* 批量下载：站点给的是 zip 二进制，原样转发给浏览器存盘 */
+  if (pathname === '/api/nat/download' && req.method === 'POST') {
+    const b = await readJson(req);
+    const { buffer, contentType } = await X.downloadFiles(b.ids, b.nameFields);
+    const stamp = new Date().toISOString().slice(0, 10);
+    res.writeHead(200, {
+      'content-type': contentType || 'application/zip',
+      'content-length': buffer.length,
+      'content-disposition': `attachment; filename="nature-photos-${stamp}.zip"`,
+      'cache-control': 'no-store',
+    });
+    res.end(buffer);
+    return;
+  }
+
+  throw bad('未知接口：' + pathname, 404);
+}
+
+/**
+ * 浏览器把本机文件夹拖进来时，文件没法直接拿到路径，只能把二进制 POST 上来。
+ * 这里按批次落到缓存里，返回临时路径，再由 /api/nat/upload 走已有的后台上传任务。
+ * 只取 basename + 扩展名白名单，挡住 ../../ 之类的路径穿越。
+ */
+async function apiNatDropFile(req, q) {
+  const batch = String(q.get('batch') || '').trim();
+  if (!/^[A-Za-z0-9_-]{1,40}$/.test(batch)) throw bad('缺少有效的批次号');
+  const raw = await readBody(req, 200 * 1024 * 1024);
+  if (!raw.length) throw bad('文件是空的');
+  let name = path.basename(String(q.get('name') || 'photo.jpg').replace(/[\\/]/g, '/'));
+  name = name.replace(/[^\w.\- ()（）\u4e00-\u9fa5]/g, '_').slice(0, 120);
+  const ext = path.extname(name).toLowerCase();
+  if (!IMAGE_EXT.has(ext)) throw bad('不是支持的图片格式：' + ext);
+  const dir = path.join(NAT_DROP, batch);
+  fs.mkdirSync(dir, { recursive: true });
+  let out = path.join(dir, name);
+  let i = 1;
+  while (fs.existsSync(out)) {
+    out = path.join(dir, `${path.parse(name).name}_${i++}${ext}`);
+  }
+  fs.writeFileSync(out, raw);
+  return { ok: true, path: out, name: path.basename(out) };
 }
 
 /* ---------------- 静态资源 ---------------- */
@@ -1468,14 +2462,32 @@ function apiState() {
       .filter((m) => !m.verify)
       .map((m) => ({ key: m.key, name: m.name, group: m.group, auth: m.auth, ready: siteReady(m.key), note: m.note || '' })),
     ui: {
-      preset: config.ui?.preset || 'auto',
+      // 用 src.preset（已经做过回落）而不是原始配置：老配置里存着 auto 的，这里要变植物
+      preset: src.preset,
       rename: !!config.ui?.rename,
-      renameOrder: config.ui?.renameOrder === 'last' ? 'last' : 'first',
-      renamePick: ['cn', 'latin', 'both'].includes(config.ui?.renamePick) ? config.ui.renamePick : 'cn',
+      renameOrder: ['first', 'last', 'only'].includes(config.ui?.renameOrder) ? config.ui.renameOrder : 'first',
+      renamePick: ['cn', 'latin', 'both', 'latinCn'].includes(config.ui?.renamePick) ? config.ui.renamePick : 'cn',
+      renameSuffix: String(config.ui?.renameSuffix || '').slice(0, 40),
       archive: !!config.ui?.archive,
       lastDir: config.ui?.lastDir || '',
     },
-    hub: { port: HUB_PORTS[0], ports: HUB_PORTS, home: HUB_HOME_DEFAULT },
+    // 检索地区：只给结果里那几个学名小标用，不影响识别
+    linkPlace: {
+      code: String(config.ui?.linkPlace?.code || ''),
+      placeId: Number(config.ui?.linkPlace?.placeId) || 0,
+      placeName: String(config.ui?.linkPlace?.placeName || ''),
+    },
+    ebird: {
+      ready: Boolean(config.sites?.ebird?.apiKey),
+      region: String(config.sites?.ebird?.region || ''),
+    },
+    // 只回「有没有」，不回明文 Key：GBIF 面板据此决定要不要走模型补中文名
+    deepseek: {
+      hasApiKey: Boolean(String(config.deepseek?.apiKey || '').trim()),
+      model: String(config.deepseek?.model || 'deepseek-chat'),
+    },
+    // 内置大陆中文名录状态：设置页显示版本 / 收录条数，无需任何配置
+    colcn: COLCN.stat(),
     // 更新：前端据此决定「要不要查、查出新版能不能自己装」
     update: {
       configured: Boolean(UPDATE_URL),
@@ -1488,8 +2500,391 @@ function apiState() {
   };
 }
 
+/* ---------------- 统计分析（bio-file 统计模块整合进标注工坊） ----------------
+ * 完全复用标注工坊自己的数据层：imgmeta 读标签、exif 读拍摄时间/GPS、taxonomy 解分类。
+ * 递归扫一个文件夹及其所有子文件夹，把每张「已标注 / 未标注」图喂给 lib/stats.js。
+ */
+
+const geoCache = new Map();
+async function reverseRegion(lat, lon) {
+  const key = `${lat.toFixed(2)},${lon.toFixed(2)}`;
+  if (geoCache.has(key)) return geoCache.get(key);
+  let label = null;
+  try {
+    const url = `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lon}&localityLanguage=zh`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(6000) });
+    if (res.ok) {
+      const j = await res.json();
+      const parts = [j.principalSubdivision, j.city || j.locality].filter(Boolean);
+      if (parts.length) label = parts.join('·');
+    }
+  } catch {
+    label = null;
+  }
+  geoCache.set(key, label);
+  return label;
+}
+
+async function walkStats(dir, root, out) {
+  if (out.length >= MAX_STAT_FILES) return;
+  let ents;
+  try {
+    ents = await fsp.readdir(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const e of ents) {
+    if (out.length >= MAX_STAT_FILES) return;
+    if (e.name.startsWith('.')) continue; // 点开头的隐藏文件/目录（.git/.cache…）
+    const full = path.join(dir, e.name);
+    try {
+      if (e.isDirectory()) {
+        if (!isHiddenDir(e.name)) await walkStats(full, root, out);
+      } else if (e.isFile() && IMAGE_EXT.has(path.extname(e.name).toLowerCase())) {
+        const rel = path.relative(root, full).split(path.sep).join('/');
+        const top = rel.includes('/') ? rel.slice(0, rel.indexOf('/')) : '';
+        const folder = rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : '根目录';
+        out.push({ full, name: e.name, stem: path.basename(e.name, path.extname(e.name)), top, folder });
+      }
+    } catch {
+      /* 坏项跳过 */
+    }
+  }
+}
+
+async function analyzeStats(dir) {
+  const root = path.resolve(dir);
+  const files = [];
+  await walkStats(root, root, files);
+
+  // 1) 读标签 + EXIF（异步批量，USB 机械盘上比同步快很多）
+  const items = [];
+  for (const f of files) {
+    let label = null;
+    try {
+      label = await IMG.readLabelFastAsync(f.full);
+    } catch {}
+    let { cn, latin } = splitNameFields(label || {});
+    // 没写标签的图，名字往往就在文件名上（验收照片十有八九如此）。
+    // 不回退读文件名的话，这些「文件名里有拉丁名」的图会被全算成未鉴定。
+    if (!cn && !latin) {
+      const nf = nameFieldsFromFile(f.name);
+      cn = nf.cn;
+      latin = nf.latin;
+    }
+    const ex = EX.meta(f.full);
+    let taken = null;
+    if (ex.dateTime) {
+      const d = new Date(String(ex.dateTime).replace(' ', 'T'));
+      if (!Number.isNaN(d.getTime())) taken = d;
+    }
+    // 仿 bio-file：无 EXIF 拍摄时间时退回文件修改时间，让时间维度不至于全空
+    if (!taken) {
+      try {
+        taken = new Date((await fsp.stat(f.full)).mtimeMs);
+      } catch {
+        taken = null;
+      }
+    }
+    items.push({ f, cn, latin, ex, taken });
+  }
+
+  // 2) 批量解析分类（复用标注工坊真实的分类缓存 + iNat/GBIF）
+  const taxoMap = await TAXO.resolve(items.map((it) => ({ latin: it.latin, cn: it.cn })));
+
+  // 3) 组装 records
+  const records = [];
+  for (const it of items) {
+    const key = it.latin ? it.latin.toLowerCase() : `cn:${it.cn.toLowerCase()}`;
+    const rec = taxoMap.get(key) || { ok: false, ranks: {} };
+    const rk = (r) => (rec.ranks && rec.ranks[r]) || {};
+    const labeled = !!(it.cn || it.latin);
+    let region = it.f.top || '根目录';
+    if (it.ex && it.ex.lat != null && it.ex.lon != null) {
+      const g = await reverseRegion(it.ex.lat, it.ex.lon);
+      if (g) region = g;
+    }
+    records.push({
+      labeled,
+      taxon: {
+        resolved: !!rec.ok,
+        kingdom: rk('kingdom').latin, kingdomCn: rk('kingdom').cn,
+        phylum: rk('phylum').latin, phylumCn: rk('phylum').cn,
+        class: rk('class').latin, classCn: rk('class').cn,
+        order: rk('order').latin, orderCn: rk('order').cn,
+        family: rk('family').latin, familyCn: rk('family').cn,
+        genus: rk('genus').latin, genusCn: rk('genus').cn,
+        cn: it.cn, latin: it.latin,
+      },
+      taken: it.taken,
+      regionLabel: region,
+      project: it.f.top || '根目录',
+      folder: it.f.folder,
+      stem: it.f.stem,
+      path: it.f.full,
+    });
+  }
+
+  // 4) 统计（已鉴定才进分类树/维度；未鉴定单独给数字+分组）
+  const level = STATS.levelCounts(records);
+  const labeledRecords = records.filter((r) => r.labeled);
+  const dims = {};
+  for (const [dim] of STATS.DIMENSIONS) dims[dim] = STATS.byDimension(labeledRecords, dim);
+  const tree = STATS.buildTree(records);
+  const unidentified = STATS.unidentifiedGroup(records);
+
+  return {
+    ok: true,
+    path: root,
+    total: records.length,
+    truncated: files.length >= MAX_STAT_FILES,
+    level,
+    dimensions: STATS.DIMENSIONS.map(([dim, label]) => ({ dim, label, data: dims[dim] })),
+    tree,
+    unidentified,
+  };
+}
+
+async function apiStats(q) {
+  let dir;
+  try {
+    dir = asDir(q.get('path'));
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+  try {
+    return await analyzeStats(dir);
+  } catch (err) {
+    return { ok: false, error: String(err && err.message ? err.message : err) };
+  }
+}
+
+
+/**
+ * 「照片评分」内置接口。
+ *
+ * 分工：JPEG 解码和 v2 算法都在浏览器 Web Worker（public/score-worker.js）里，
+ * 服务端只做持久化、批内星级、连拍分组、AI 设置与 AI 请求转发。
+ * 这样既保住「零依赖单文件 exe」，又让 SV=2 的分数和 bio-image 完全一致。
+ */
+async function handleScore(req, res, pathname, q) {
+  const fallbackDir = () => config.ui?.lastDir || places()[0]?.path;
+  const dirOf = (v) => asDir(v || fallbackDir());
+
+  // 读取整个目录的评分（含星级分布）。切到评分页 / 换文件夹时调一次
+  if (pathname === '/api/score/view' && req.method === 'GET') {
+    return sendJson(res, 200, SCORE.view(dirOf(q.get('dir'))));
+  }
+  // Worker 一批算完就提交，服务端合并后重算星级
+  if (pathname === '/api/score/put' && req.method === 'POST') {
+    const b = await readJson(req);
+    const dir = dirOf(b.dir);
+    const data = SCORE.put(dir, b.entries || {});
+    return sendJson(res, 200, { ok: true, updated: data.updated, scored: Object.keys(data.scores).length });
+  }
+  if (pathname === '/api/score/clear' && req.method === 'POST') {
+    const b = await readJson(req);
+    const dir = dirOf(b.dir);
+    // names 为空 = 整个目录清空；给了就是只清这几张（界面上勾了几张就清几张）
+    const names = Array.isArray(b.names) ? b.names : null;
+    const r = SCORE.clear(dir, names);
+    return sendJson(res, 200, { ok: true, cleared: r.cleared || 0, scope: names && names.length ? 'names' : 'dir' });
+  }
+  // 评分分组里的「搬到某个文件夹」：按低于多少分筛，或直接给一组文件名。
+  // 和「按分类归档」不同，这里是平铺搬过去、不建分类树；评分记录跟着照片一起走。
+  if (pathname === '/api/score/move' && req.method === 'POST') {
+    const b = await readJson(req);
+    const dir = dirOf(b.dir);
+    const dest = asDir(String(b.dest || '').trim());
+    if (path.resolve(dest).toLowerCase() === path.resolve(dir).toLowerCase()) {
+      throw bad('目标文件夹不能就是当前文件夹');
+    }
+    const view = SCORE.view(dir);
+    let names;
+    if (Array.isArray(b.files) && b.files.length) {
+      names = [...new Set(b.files.map(String).filter((n) =>
+        n && !n.startsWith('.') && !n.includes('/') && !n.includes('\\') && !n.includes('..') && SCORE.isImage(n)))];
+    } else {
+      const below = Number(b.below);
+      if (!Number.isFinite(below)) throw bad('请填一个 0–100 的分数');
+      names = Object.keys(view.scores).filter((n) => {
+        const r = view.scores[n] || {};
+        const v = r.final !== undefined && r.final !== null ? Number(r.final) : Number(r.total);
+        return Number.isFinite(v) && v < below;
+      });
+    }
+    fs.mkdirSync(dest, { recursive: true });
+    const movedNames = [];
+    const moving = {};
+    const failed = [];
+    for (const n of names) {
+      const src = path.join(dir, n);
+      if (!fs.existsSync(src)) continue;
+      const target = uniquePath(path.join(dest, n));
+      try {
+        try { fs.renameSync(src, target); }
+        catch (e) {
+          if (e.code !== 'EXDEV') throw e;
+          fs.copyFileSync(src, target);
+          fs.unlinkSync(src);
+        }
+        const landed = path.basename(target);
+        movedNames.push(n);
+        if (view.scores[n]) moving[landed] = view.scores[n];
+      } catch (e) {
+        failed.push({ name: n, error: e.message });
+      }
+    }
+    // 先搬文件再写评分：put 会按「目标目录里确实存在这张图」重算星级
+    if (Object.keys(moving).length) {
+      try { SCORE.put(dest, moving); } catch { /* 评分没跟上不影响照片已经搬走 */ }
+    }
+    if (movedNames.length) SCORE.clear(dir, movedNames);
+    return sendJson(res, 200, { ok: true, dest, moved: movedNames.length, names: movedNames, failed });
+  }
+  // 评分前一次拿齐 ISO / 拍摄时间 / 体积，别让 Worker 一张一张回来问
+  if (pathname === '/api/score/meta' && req.method === 'POST') {
+    const b = await readJson(req);
+    const dir = dirOf(b.dir);
+    const names = (Array.isArray(b.names) ? b.names : []).slice(0, 5000).map(String);
+    const out = {};
+    for (const n of names) {
+      if (!n || n.startsWith('.') || n.includes('/') || n.includes('\\') || n.includes('..')) continue;
+      if (!SCORE.isImage(n)) continue;
+      const full = path.join(dir, n);
+      if (!fs.existsSync(full)) continue;
+      out[n] = SCORE.fileMeta(full);
+    }
+    return sendJson(res, 200, { ok: true, dir, meta: out });
+  }
+  if (pathname === '/api/score/bursts' && req.method === 'GET') {
+    return sendJson(res, 200, SCORE.bursts(dirOf(q.get('dir')), q.get('gap')));
+  }
+  // 评分页的子文件夹条：上一层 / 本层张数 / 子文件夹（带各层张数）
+  if (pathname === '/api/score/dirs' && req.method === 'GET') {
+    return sendJson(res, 200, await apiScoreDirs(q));
+  }
+
+  // ---- 本地大模型：内置运行库 + 一键拉起 llama-server ----
+  if (pathname === '/api/score/llama/status' && req.method === 'GET') {
+    return sendJson(res, 200, LLAMA.status());
+  }
+  if (pathname === '/api/score/llama/models' && req.method === 'GET') {
+    return sendJson(res, 200, LLAMA.listModels(q.get('dir') || ''));
+  }
+  if (pathname === '/api/score/llama/start' && req.method === 'POST') {
+    const b = await readJson(req);
+    const r = await LLAMA.start({
+      model: b.model,
+      mmproj: b.mmproj,
+      ctx: b.ctx,
+      ngl: b.ngl,
+      threads: b.threads,
+    });
+    return sendJson(res, 200, r);
+  }
+  if (pathname === '/api/score/llama/stop' && req.method === 'POST') {
+    return sendJson(res, 200, LLAMA.stop());
+  }
+  // 在文件管理器里打开 models 文件夹（用户自己下的 gguf 直接丢进去就行）
+  if (pathname === '/api/score/llama/open-models' && req.method === 'POST') {
+    const b = await readJson(req);
+    return sendJson(res, 200, LLAMA.openModelDir(b.dir));
+  }
+
+  // ---- AI 设置：明文 Key 只在服务端内存里，永远不回浏览器 ----
+  if (pathname === '/api/score/ai' && req.method === 'GET') {
+    return sendJson(res, 200, {
+      ok: true,
+      cfg: SCORE.aiPublic(),
+      cloudModels: SCAI.CLOUD_MODELS,
+      localGuide: SCAI.LOCAL_GUIDE,
+      taxa: SCAI.TAXA,
+    });
+  }
+  if (pathname === '/api/score/ai' && req.method === 'POST') {
+    const b = await readJson(req);
+    return sendJson(res, 200, { ok: true, cfg: SCORE.aiSet(b) });
+  }
+  if (pathname === '/api/score/ai/test' && req.method === 'POST') {
+    const b = await readJson(req);
+    const r = await SCAI.test({ engine: b.engine, cfg: SCORE.aiPublic(), key: SCORE.aiRaw().key });
+    return sendJson(res, 200, r);
+  }
+  // 浏览器压好图再传，服务端转发到云端 / 本地 llama-server，并把结果写回评分缓存
+  if (pathname === '/api/score/ai/run' && req.method === 'POST') {
+    const b = await readJson(req);
+    const r = await SCAI.run({
+      engine: b.engine,
+      cfg: SCORE.aiPublic(),
+      key: SCORE.aiRaw().key,
+      images: b.images || [],
+      taxon: b.taxon,
+      strict: b.strict,
+    });
+    if (b.dir && r.results) {
+      const entries = {};
+      for (const one of r.results) {
+        if (!one.ai) continue;
+        // 记下这次评审用的判据，详情里要显示「专用昆虫检测」标记
+        entries[one.name] = r.strict ? { ai: one.ai, insect_strict: true } : { ai: one.ai };
+      }
+      if (Object.keys(entries).length) SCORE.put(dirOf(b.dir), entries);
+    }
+    // 跑挂了也要把真实错误带出来：api() 抛错时只认顶层 error，而 SCAI.run 把错误
+    // 放在 errors[] 里；不搬一层，前端就只能看到没用的「HTTP 200」。
+    if (r.ok === false && !r.error && r.errors && r.errors.length) r.error = r.errors[0];
+    return sendJson(res, 200, r);
+  }
+
+  // ---- 自然在线相册里的照片也能评分：按 photoId 存，不参与本机目录的批内星级 ----
+  if (pathname === '/api/score/remote' && req.method === 'GET') {
+    return sendJson(res, 200, { ok: true, items: SCORE.remoteGet() });
+  }
+  if (pathname === '/api/score/remote' && req.method === 'POST') {
+    const b = await readJson(req);
+    const key = String(b.key || '').slice(0, 120);
+    if (!key) throw bad('缺少照片编号');
+    SCORE.remotePut(key, { rec: b.rec || {}, name: String(b.name || ''), source: String(b.source || '') });
+    return sendJson(res, 200, { ok: true });
+  }
+  return sendJson(res, 404, { ok: false, error: '未知的照片评分接口' });
+}
+
 async function handleApi(req, res, pathname, q) {
   if (pathname === '/api/state') return sendJson(res, 200, apiState());
+
+  // 候选物种悬停时的科属信息：一次把 8 个候选批量查了，命中缓存就不联网。
+  // 只回科、属两级 —— 界面上够用，也不把整条分类链塞进前端。
+  if (pathname === '/api/taxonomy' && req.method === 'POST') {
+    const b = await readJson(req);
+    const items = (Array.isArray(b.items) ? b.items : []).slice(0, 24)
+      .map((x) => ({
+        latin: String((x && x.latin) || '').trim().slice(0, 120),
+        cn: String((x && x.cn) || '').trim().slice(0, 120),
+      }))
+      .filter((x) => x.latin || x.cn);
+    let m = new Map();
+    try { m = await TAXO.resolve(items); } catch { /* 断网就当查不到，绝不影响识别 */ }
+    const out = {};
+    for (const [k, rec] of m) {
+      const f = rec && rec.ok && rec.ranks && rec.ranks.family;
+      const g = rec && rec.ok && rec.ranks && rec.ranks.genus;
+      out[k] = {
+        family: f ? { latin: String(f.latin || ''), cn: String(f.cn || '') } : null,
+        genus: g ? { latin: String(g.latin || ''), cn: String(g.cn || '') } : null,
+      };
+    }
+    return sendJson(res, 200, { ok: true, items: out });
+  }
+
+  // 自然在线（账号相册）：整块交给 handleNature，动静大，单独一个文件级的分支
+  if (pathname.startsWith('/api/nat/')) return handleNature(req, res, pathname, q);
+  // 照片评分（内置）：整块交给 handleScore
+  if (pathname.startsWith('/api/score/')) return handleScore(req, res, pathname, q);
+
+  // 统计分析：递归扫当前文件夹及其子文件夹下所有已标注/未标注物种图
+  if (pathname === '/api/stats') return sendJson(res, 200, await apiStats(q));
 
   // 盘符（左侧树的根）。卷标是后台查的，第一次可能还没到，前端据此再拉一次
   if (pathname === '/api/drives') {
@@ -1501,6 +2896,11 @@ async function handleApi(req, res, pathname, q) {
 
   // 树展开：只列子文件夹
   if (pathname === '/api/dirs') return sendJson(res, 200, await apiDirs(q));
+
+  if (pathname === '/api/subdirs') return sendJson(res, 200, await apiSubdirs(q));
+
+  // 某个文件夹里的图片路径（可递归）：给「左侧文件夹拖到相册」用
+  if (pathname === '/api/images') return sendJson(res, 200, await apiImages(q));
 
   if (pathname === '/api/list') return sendJson(res, 200, await apiList(q));
 
@@ -1517,6 +2917,28 @@ async function handleApi(req, res, pathname, q) {
     return sendJson(res, 200, await apiIdentify(await readJson(req)));
   }
 
+  /* 单张图直接粘贴识别：图不在磁盘上，前端把压好的两份 JPEG 送过来即可。
+   * 走的是和本地文件完全一样的 identifyImage，站点开关、去重、聚合都不用另写一套。 */
+  if (pathname === '/api/identify/paste' && req.method === 'POST') {
+    const body = await readJson(req);
+    const raw = String(body.dataJpeg || '');
+    const b64 = raw.replace(/^data:image\/[^;]+;base64,/, '');
+    if (!b64) throw bad('没有图片数据');
+    const jpeg = Buffer.from(b64, 'base64');
+    const smallRaw = String(body.dataSmall || '').replace(/^data:image\/[^;]+;base64,/, '');
+    const small = smallRaw ? Buffer.from(smallRaw, 'base64') : null;
+    const name = String(body.name || '').trim() || '粘贴图片.jpg';
+    const out = await identifyImage({
+      buffer: jpeg,
+      mime: 'image/jpeg',
+      filename: name,
+      small,
+      jpeg,
+      sources: body.sources,
+    });
+    return sendJson(res, 200, { ...out, name, pasted: true });
+  }
+
   if (pathname === '/api/write' && req.method === 'POST') {
     return sendJson(res, 200, await apiWrite(await readJson(req)));
   }
@@ -1526,7 +2948,22 @@ async function handleApi(req, res, pathname, q) {
   }
 
   if (pathname === '/api/archive' && req.method === 'POST') {
-    return sendJson(res, 200, await apiArchive(await readJson(req)));
+    const body = await readJson(req);
+    // 实际归并（apply:true）改成后台任务，前端轮询进度条；预览（apply:false）仍同步返回
+    if (body.apply === true) {
+      try {
+        const id = startArchiveJob(body);
+        return sendJson(res, 200, { ok: true, jobId: id });
+      } catch (e) {
+        return sendJson(res, 200, { ok: false, error: e.message });
+      }
+    }
+    return sendJson(res, 200, await apiArchive(body));
+  }
+
+  if (pathname.startsWith('/api/archive/job/') && req.method === 'GET') {
+    const id = pathname.slice('/api/archive/job/'.length);
+    return sendJson(res, 200, getArchiveJob(id));
   }
 
   // 单张图的拍摄时间 / 坐标，面板上显示用（不带缩略图，别把几 KB 的图塞进 JSON）
@@ -1548,8 +2985,306 @@ async function handleApi(req, res, pathname, q) {
     });
   }
 
-  if (pathname === '/api/hub/link') {
-    return sendJson(res, 200, await apiHubLink(q));
+  /* ---------------- 学名旁的查询小标（从聚合台并进来） ----------------
+   * 结果里每个候选学名旁边都会挂 iNat / PPBC / 自然在线 / GBIF 几个小标，点开是
+   * 「拿这个属名去别处查一眼」。它们不参与打分，所以哪一个查不动都不该影响识别，
+   * 接口一律回 200，只把 ok:false 和原因带回去。
+   *
+   * 「检索地区」只决定深链跳到哪个范围（福建 / 全世界），不影响识别本身；
+   * 存在 config.ui.linkPlace。三项必须整体替换 —— 选了「全世界」只传 code 时，
+   * placeId 一兜底就变回上一次的武夷山，结果按福建算了。
+   */
+  if (pathname === '/api/inat/taxa' && req.method === 'POST') {
+    const body = await readJson(req);
+    const names = Array.isArray(body.names) ? body.names.slice(0, 30) : [];
+    try {
+      const taxa = await INAT.resolveTaxa(names, String(body.hint || ''));
+      return sendJson(res, 200, { ok: true, taxa });
+    } catch (err) {
+      return sendJson(res, 200, { ok: false, error: err.message || 'iNaturalist 查询失败', taxa: {} });
+    }
+  }
+
+  if (pathname === '/api/inat/places' && req.method === 'GET') {
+    const kw = String(q.get('q') || '').trim();
+    if (kw.length < 2) return sendJson(res, 200, { ok: true, results: [] });
+    try {
+      const results = await INAT.searchPlaces(kw, 8);
+      return sendJson(res, 200, { ok: true, results });
+    } catch (err) {
+      return sendJson(res, 200, { ok: false, error: err.message || '地区搜索失败', results: [] });
+    }
+  }
+
+  // 手动验证 / 调试用：一条 GET 就能看到拼出来的 iNat 深链
+  if (pathname === '/api/inat/link' && req.method === 'GET') {
+    const genus = INAT.genusOf(q.get('latin') || '');
+    if (!genus) return sendJson(res, 200, { ok: false, error: '学名里认不出属名' });
+    const taxa = await INAT.resolveTaxa([genus], q.get('hint') || '').catch(() => ({}));
+    const hit = taxa[genus.toLowerCase()];
+    const customId = Number(q.get('placeId')) || 0;
+    const lp = linkPlaceOf(q);
+    const resolved = INAT.resolvePlace(
+      customId > 0 ? { placeId: customId, placeName: q.get('placeName') || '' } : { place: lp.code },
+    );
+    return sendJson(res, 200, {
+      ok: true,
+      genus,
+      taxonId: hit ? hit.id : 0,
+      place: resolved.name,
+      placeId: resolved.placeId,
+      custom: resolved.custom,
+      url: INAT.buildUrl({ genus, taxonId: hit ? hit.id : 0, placeId: resolved.placeId }),
+    });
+  }
+
+  // 植物智：地区 → pro（省）+ didian（地点）两个参数，同时给出人类可读的范围
+  if (pathname === '/api/ppbc/region' && req.method === 'GET') {
+    try {
+      const r = await PPBC.resolveRegion(linkPlaceOf(q));
+      return sendJson(res, 200, { ok: true, ...r, scope: PPBC.scopeLabel(r) });
+    } catch (err) {
+      return sendJson(res, 200, { ok: false, error: err.message || '换算地区失败' });
+    }
+  }
+
+  if (pathname === '/api/ppbc/link' && req.method === 'GET') {
+    const genus = INAT.genusOf(q.get('latin') || q.get('genus') || '');
+    if (!genus) return sendJson(res, 200, { ok: false, error: '学名里认不出属名' });
+    const region = await PPBC.resolveRegion(linkPlaceOf(q));
+    return sendJson(res, 200, {
+      ok: true,
+      genus,
+      place: region.name,
+      pro: region.pro,
+      didian: region.didian,
+      scope: PPBC.scopeLabel(region),
+      url: PPBC.buildUrl({ genus, pro: region.pro, didian: region.didian }),
+    });
+  }
+
+  /* 自然在线：按地区查「这个属在本地名录里有哪些种」。和看图识别共用同一张令牌。
+   * 站点搜索用中文标题模糊匹配，关键词由检索地区名推（「南平市武夷山市」→「武夷山」），
+   * 面板里也能手填。名录接口只能整份拉，所以 lib/nature.js 里按站点缓存 30 分钟。 */
+  if (pathname === '/api/nature/sites' && req.method === 'GET') {
+    const genus = INAT.genusOf(q.get('genus') || q.get('latin') || '');
+    if (!genus) return sendJson(res, 200, { ok: false, error: '学名里认不出属名' });
+    // 关键词优先级：手填的 q > 检索地区推出来的
+    let keyword = String(q.get('q') || '').trim();
+    let scope = '';
+    if (!keyword) {
+      const region = await PPBC.resolveRegion(linkPlaceOf(q)).catch(() => null);
+      keyword = GNAT.keywordOf(region?.didian || region?.pro || region?.name || '');
+      scope = PPBC.scopeLabel(region || {});
+    }
+    const token = String(config.sites?.xingse?.token || '');
+    try {
+      const out = await GNAT.genusBySites(token, { genus, keyword });
+      return sendJson(res, 200, { ok: true, scope, ...out });
+    } catch (err) {
+      return sendJson(res, 200, {
+        ok: false,
+        genus,
+        keyword,
+        scope,
+        error: err.message || '自然在线查询失败',
+      });
+    }
+  }
+
+  /* 自然在线「照片高级搜索」：按「目标类群（属名）+ 地名」查站内照片。
+   * 站方这个接口是私有 POST（/api/online/natureInquiry/inquiry/photo/advanced），
+   * 表单在站内是个弹窗、不吃 URL 参数，所以这里先在服务端问一次数量，
+   * 再把用户送到站内的搜索结果页（/msearch?kw=属名 会自动执行搜索）。
+   * 只回照片数和几张样本，令牌不出服务端。 */
+  if (pathname === '/api/nature/photo-adv' && req.method === 'GET') {
+    const genus = INAT.genusOf(q.get('genus') || q.get('latin') || '');
+    if (!genus) return sendJson(res, 200, { ok: false, error: '学名里认不出属名' });
+    const lp = linkPlaceOf(q);
+    const region = await PPBC.resolveRegion(lp).catch(() => null);
+    // 前端 aggPlaceQS() 传的 place 是省代码（CN-35），站方高级搜索只认中文地名。
+    // 先经 resolveRegion 换成「福建」，自定义地区则用用户填的地名；全国范围不按地区筛。
+    let place =
+      GNAT.keywordOf(region?.didian || region?.pro || '') ||
+      String(lp.placeName || '').trim() ||
+      GNAT.keywordOf(region?.name || '');
+    if (!lp.code && !lp.placeId) place = '';
+    const token = String(config.sites?.xingse?.token || '');
+    const url =
+      'https://ecp.ibiodiversity.cn/msearch?kw=' + encodeURIComponent(genus) +
+      (place ? '&place=' + encodeURIComponent(place) : '');
+    let total = 0;
+    let sample = [];
+    let err = '';
+    try {
+      const body = {
+        keyword: genus,
+        userScope: 'all',
+        users: [],
+        years: [],
+        months: [],
+        countryId: '',
+        regionId: '',
+        provinceId: '',
+        cityId: '',
+        countyId: '',
+        placeKeyword: place,
+        pageNum: 1,
+        pageSize: 3,
+      };
+      const resp = await fetch('https://ecp.ibiodiversity.cn/api/online/natureInquiry/inquiry/photo/advanced', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json;charset=UTF-8',
+          accept: 'application/json, text/plain, */*',
+          origin: 'https://ecp.ibiodiversity.cn',
+          referer: 'https://ecp.ibiodiversity.cn/',
+          ...(token ? { authorization: 'Bearer ' + token } : {}),
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(20000),
+      });
+      const j = await resp.json();
+      if (j.code !== '00000') err = String(j.msg || '站方返回了错误');
+      else {
+        const out = j.data?.result || {};
+        total = Number(out.total) || 0;
+        sample = (Array.isArray(out.records) ? out.records : []).map((r) => ({
+          photoId: String(r.photoId || ''),
+          cn: String(r.cname || ''),
+          latin: String(r.lname || ''),
+          location: String(r.location || ''),
+        }));
+      }
+    } catch (e) {
+      err = e.message || '连不上自然在线';
+    }
+    return sendJson(res, 200, { ok: true, genus, place, total, sample, url, error: err });
+  }
+
+  /* GBIF：这个属在这个地区有哪些种。
+   * GBIF 自己的 REST 接口是公开的（只读不需要任何 Key）；中文名先取 iNaturalist，
+   * 配了 DeepSeek Key 才补剩下的 + 写归纳。模型归纳单独一块并标明「未经核实」。 */
+  if (pathname === '/api/gbifds/query' && req.method === 'GET') {
+    const genus = INAT.genusOf(q.get('genus') || q.get('latin') || '');
+    if (!genus) return sendJson(res, 200, { ok: false, error: '学名里认不出属名' });
+    // 同名属在动植物里都有（Ficus 桑科/䗉螺、Pieris 马醉木/粉蝶），不带界 GBIF 匹配不到；
+    // 通用组不知道是哪一类，交给 lib/gbifds.js 依次试。
+    const group = String(q.get('group') || '').trim();
+    const kingdom =
+      group === 'plant' ? 'Plantae' : group === 'fungi' ? 'Fungi' : group === 'general' ? '' : 'Animalia';
+    const lp = linkPlaceOf(q);
+    const region = await PPBC
+      .resolveRegion(lp)
+      .catch(() => ({ pro: '', didian: '', inChina: true, name: '', custom: false }));
+    // resolveRegion 只回 pro/didian，国家码得自己补 —— GBIF 靠它筛境外
+    region.code = lp.code;
+
+    let data;
+    try {
+      data = await GBIFDS.query({ genus, kingdom, region });
+    } catch (err) {
+      return sendJson(res, 200, { ok: false, genus, error: err.message || 'GBIF 查询失败' });
+    }
+    // 记录没查成 ≠ 该地区没有分布，这两种情况必须分开
+    if (data.facetError) {
+      return sendJson(res, 200, {
+        ok: false,
+        genus: data.genus,
+        error: `GBIF 的记录没能取到（${data.facetError}）。这不代表该地区没有分布，过一会儿再试一次。`,
+      });
+    }
+    const area = data.scope || region.name || '全球';
+    const question = `请通过 GBIF 查询 ${data.genus} 属在 ${area} 的全部种有哪些？`;
+
+    // 中文名问 iNaturalist（志愿者投票出来的俗名，可追溯），取不到再让 DeepSeek 补。
+    // iNaturalist 的优先级永远高于模型 —— 模型爱「顺手纠正」已有名字，这里不让它改。
+    let inat = { map: {}, tried: 0, stopped: false };
+    try {
+      inat = await GBIFDS.inatChineseNames(data.species);
+    } catch {
+      /* 网络不通就当没拿到，不影响 GBIF 的表 */
+    }
+    const dsKey = String(config.deepseek?.apiKey || '').trim();
+    const dsModel = String(config.deepseek?.model || 'deepseek-chat');
+    let answer = null;
+    let warning = '';
+    if (!dsKey) {
+      warning = 'GBIF 的读取接口是公开的、不需要 API Key；这里缺的是补中文名和归纳用的 DeepSeek Key。到「照片评分 → AI 设置」里填一个就能补齐。';
+    } else {
+      try {
+        answer = await GBIFDS.ask({ apiKey: dsKey, model: dsModel, question, data, known: inat.map });
+      } catch (err) {
+        warning = 'DeepSeek 没答上来：' + (err.message || '未知错误') + '（GBIF 记录和 iNaturalist 中文名不受影响）';
+      }
+    }
+    let nInat = 0;
+    let nDs = 0;
+    const species = (data.species || []).map((s) => {
+      const fromInat = GBIFDS.lookupCn(inat.map, s.latin);
+      const cn = fromInat || GBIFDS.lookupCn(answer && answer.cn, s.latin);
+      if (fromInat) nInat += 1;
+      else if (cn) nDs += 1;
+      return { ...s, cn: cn || '', cnFrom: cn ? (fromInat ? 'inat' : 'ds') : '' };
+    });
+    const named = species.filter((s) => s.cn).length;
+    if (!warning) {
+      warning = named
+        ? `中文名 ${named}/${species.length} 个：iNaturalist ${nInat} · DeepSeek ${nDs}，学名一律以 GBIF 为准。`
+        : 'GBIF 有记录，但两处都没配出中文名；下面就是原始记录。';
+    }
+    return sendJson(res, 200, {
+      ok: true,
+      question,
+      kingdom,
+      regionName: data.scope,
+      regionNote: data.note,
+      genus: data.genus,
+      family: data.family,
+      usageKey: data.usageKey,
+      isSynonym: Boolean(data.isSynonym),
+      acceptedGenus: data.acceptedGenus || '',
+      globalTotal: data.globalTotal,
+      records: data.records,
+      species,
+      level: data.level,
+      // 模型归纳单独一块，前端会标明「未经核实」，别和 GBIF 记录混在一张表里
+      answer: answer
+        ? { ...answer, cnStats: { inat: nInat, ds: nDs, missing: species.length - named } }
+        : { summary: '', cn: {}, extra: [], cnStats: { inat: nInat, ds: nDs, missing: species.length - named } },
+      warning,
+      cnLookup: { tried: inat.tried || 0, stopped: Boolean(inat.stopped) },
+      deepseek: { hasApiKey: Boolean(dsKey), model: dsModel },
+    });
+  }
+
+  /* eBird：坐标 → 地区码（前端点开 eBird 时先要一次定位） */
+  if (pathname === '/api/ebird/region' && req.method === 'GET') {
+    const cfg = config.sites?.ebird || {};
+    if (!cfg.apiKey) return sendJson(res, 200, { ok: false, error: 'eBird 未配置 API key' });
+    try {
+      const out = await EBIRD.regionAt(cfg, Number(q.get('lat')), Number(q.get('lng')));
+      return sendJson(res, 200, { ok: Boolean(out.code), ...out });
+    } catch (err) {
+      return sendJson(res, 200, { ok: false, error: err.message || '定位换算失败' });
+    }
+  }
+
+  /* eBird：候选学名在本地区近 14 天有没有记录。不参与打分，只作旁证。 */
+  if (pathname === '/api/ebird/check' && req.method === 'POST') {
+    const body = await readJson(req);
+    const names = Array.isArray(body.sciNames) ? body.sciNames : [];
+    const cfg = { ...(config.sites?.ebird || {}) };
+    if (body.region) cfg.region = String(body.region).trim();
+    if (!cfg.apiKey) {
+      return sendJson(res, 200, { ok: false, error: 'eBird 未配置 API key', skipped: true });
+    }
+    try {
+      const out = await EBIRD.check(cfg, names);
+      return sendJson(res, 200, { ok: true, ...out });
+    } catch (err) {
+      return sendJson(res, 200, { ok: false, error: err.message || 'eBird 查询失败' });
+    }
   }
 
   /* ---------------- 自动更新 ----------------
@@ -1587,29 +3322,65 @@ async function handleApi(req, res, pathname, q) {
     }
   }
 
+  // 内置大陆中文名录自检：拿一个学名查一下内置索引，确认名录随程序带上了。
+  // 只读、不联网、不改动任何状态。
+  if (pathname === '/api/colcn/test' && req.method === 'POST') {
+    const body = await readJson(req);
+    return sendJson(res, 200, COLCN.test(body && body.scientificName ? body.scientificName : ''));
+  }
+
   if (pathname === '/api/config' && req.method === 'POST') {
     const body = await readJson(req);
     if (body.preset) {
       const hit = PRESETS.find((p) => p.key === body.preset);
       if (!hit) return sendJson(res, 400, { ok: false, error: '未知方案' });
       config.ui = { ...(config.ui || {}), preset: body.preset };
+      // 换方案 = 换类群，豆包这类按次计费的收回（要再用得再点一次）
+      oneShotOn = new Set();
     }
     // 用户点了某个站点的开关：按方案记一份，换回来还是他上次那套
     if (Array.isArray(body.picks)) {
       const { preset, all } = presetAll(config.ui?.preset);
-      const picks = body.picks.filter((k) => all.includes(k));
+      // 一次性模型不落盘，只记在内存里（见 ONE_SHOT_SITES 的说明）
+      const picks = body.picks.filter((k) => all.includes(k) && !ONE_SHOT_SITES.has(k));
+      oneShotOn = new Set(body.picks.filter((k) => ONE_SHOT_SITES.has(k)));
       config.ui = { ...(config.ui || {}), picks: { ...(config.ui?.picks || {}), [preset]: picks } };
     }
     if (Array.isArray(body.sources)) config.ui = { ...(config.ui || {}), sources: body.sources };
     if (typeof body.rename === 'boolean') config.ui = { ...(config.ui || {}), rename: body.rename };
-    if (body.renameOrder === 'first' || body.renameOrder === 'last') {
+    if (['first', 'last', 'only'].includes(body.renameOrder)) {
       config.ui = { ...(config.ui || {}), renameOrder: body.renameOrder };
     }
-    if (['cn', 'latin', 'both'].includes(body.renamePick)) {
+    if (['cn', 'latin', 'both', 'latinCn'].includes(body.renamePick)) {
       config.ui = { ...(config.ui || {}), renamePick: body.renamePick };
+    }
+    if (typeof body.renameSuffix === 'string') {
+      config.ui = { ...(config.ui || {}), renameSuffix: safeName(body.renameSuffix).slice(0, 40) };
     }
     if (typeof body.archive === 'boolean') {
       config.ui = { ...(config.ui || {}), archive: body.archive };
+    }
+    // 检索地区：三项整体写入（前端选完地区一次发全），不做逐项合并
+    if (body.linkPlace && typeof body.linkPlace === 'object') {
+      const p = body.linkPlace;
+      config.ui = {
+        ...(config.ui || {}),
+        linkPlace: {
+          code: String(p.code || '').trim(),
+          placeId: Number(p.placeId) || 0,
+          placeName: String(p.placeName || '').trim(),
+        },
+      };
+    }
+    // GBIF 面板的中文名补全：Key 留空表示「不改」，clear=true 才清掉。明文不回浏览器。
+    if (body.deepseek && typeof body.deepseek === 'object') {
+      const d = body.deepseek;
+      const next = { ...(config.deepseek || {}) };
+      const k = String(d.apiKey || '').trim();
+      if (k) next.apiKey = k;
+      if (typeof d.model === 'string' && d.model.trim()) next.model = d.model.trim();
+      if (d.clear === true) next.apiKey = '';
+      config.deepseek = next;
     }
     persistConfig();
     return sendJson(res, 200, apiState());
@@ -1690,7 +3461,7 @@ server.on('error', async (err) => {
     if (who && who.id === 'tagden') {
       console.log(`  端口 ${port} 上已经开着一个标注工坊${who.version ? `（v${who.version}）` : ''}，直接给你打开浏览器。`);
       console.log('  如果那个窗口是旧的、想换成现在这个，先把它关掉再启动。');
-      openBrowser(`http://127.0.0.1:${port}`);
+      if (!process.env.TAGDEN_NO_BROWSER) openBrowser(`http://127.0.0.1:${port}`);
       setTimeout(() => process.exit(0), 1500);
       return;
     }
@@ -1735,7 +3506,7 @@ server.listen(port, '127.0.0.1', () => {
     }
   })();
 
-  openBrowser(`http://127.0.0.1:${port}`);
+  if (!process.env.TAGDEN_NO_BROWSER) openBrowser(`http://127.0.0.1:${port}`);
 
   // 缩略图缓存攒太多会拖慢目录列举，后台慢慢清（不阻塞启动）
   setTimeout(() => {
@@ -1750,9 +3521,18 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
     try {
       LC.flushAll();
     } catch {}
+    try {
+      LLAMA.shutdown(); // 别把 llama-server 留在后台吃内存
+    } catch {}
     process.exit(0);
   });
 }
+// 黑窗口被直接关掉时不一定给 SIGINT，exit 里再兜一次
+process.on('exit', () => {
+  try {
+    LLAMA.shutdown();
+  } catch {}
+});
 
 /**
  * 缩略图缓存清理：一张图一个文件，翻过的文件夹多了会攒出几万个小文件。

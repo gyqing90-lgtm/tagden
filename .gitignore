@@ -1,6 +1,8 @@
 # ---------- 本机配置与账号（含明文密钥，绝对不要上传） ----------
 data/
 data-tagden/
+# 内嵌默认账号的密文：配合 lib/secure.js 的主密钥可解出真实账号，不进版本库
+lib/seed.js
 oss.config.json
 .cache/
 .probe/
@@ -24,3 +26,7 @@ desktop.ini
 *.tmp
 .idea/
 .vscode/
+
+# ---------- 本地测试素材（不进仓库） ----------
+_jobtest/
+screenshots/
