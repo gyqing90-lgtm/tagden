@@ -27,7 +27,7 @@ npm run canary -- --self-test    # 只检查素材/站点表，不联网（CI �
 npm run canary -- --all          # 连付费/可选站点一起跑（会消耗额度）
 
 # Windows 冒烟（在 Windows 上跑，不碰真实 data/）：
-powershell -ExecutionPolicy Bypass -File .\tools\smoke-win.ps1 -Exe .\tagden-0.6.26.exe
+powershell -ExecutionPolicy Bypass -File .\tools\smoke-win.ps1 -Exe .\tagden-0.6.27.exe
 ```
 
 发布签名（首次发版前做一次）：
@@ -35,8 +35,8 @@ powershell -ExecutionPolicy Bypass -File .\tools\smoke-win.ps1 -Exe .\tagden-0.6
 ```bash
 npm run keygen    # 生成 ~/.tagden/update-signing-key.pem（私钥，别进仓库）和 update-pubkey.pem（公钥）
 npm test          # 28 项回归
-npm run build:win -- 0.6.26
-npm run build:mac -- 0.6.26
+npm run build:win -- 0.6.27
+npm run build:mac -- 0.6.27
 npm run sign      # 给 dist/latest.json 与 dist-mac/latest-mac.json 签名
 npm run publish   # 上传并回读校验；配了公钥后，未签名/验签失败的清单会被拒绝
 # 发布凭据在仓库外：~/.tagden/oss.config.json，或 --config / OSS_CONFIG / OSS_* 环境变量

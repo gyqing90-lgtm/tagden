@@ -1222,7 +1222,14 @@ function neField(labelText, cls, value, placeholder) {
 
 function openNameEditor(p, anchor) {
   closeNameEditor();
-  const f = S.byPath.get(p) || (S.files || []).find((x) => x.path === p);
+  const files = Array.isArray(S.files) ? S.files : [];
+  let f = S.byPath.get(p) || files.find((x) => x.path === p);
+  // 自然在线页的站点照片不在 S.files 里，按 photoId 从 NAT.photos 找
+  if (!f && isNatKey(p)) {
+    const id = p.slice(NAT_KEY.length);
+    const np = (NAT.photos || []).find((x) => String(x.photoId) === id);
+    if (np) f = natPhotoAsFile(np);
+  }
   if (!f) return;
   const album = isNatKey(p);
   const pair = speciesPairOf(f);
@@ -1306,6 +1313,11 @@ async function saveNameEdit(p, f, cnInput, laInput, saveBtn) {
       NAT.renames = new Map((out.records || []).filter((x) => x && x.photoId).map((x) => [String(x.photoId), x]));
       refreshPendingBadge();
       patchAlbumCard(p);
+      // 自然在线页的卡片不在 S.els 里，写完直接重铺当前这一页，让「待上传」立刻出现
+      if (S.tab === 'nature') {
+        if (NAT.side === 'album') renderNatPhotos();
+        else renderNatLocal();
+      }
       toast('已写入待上传鉴定，点「重新鉴定上传」同步站点', 3600);
     } else {
       await post('/api/write', { path: p, cn, latin, note: '', source: '手工填写', rename: false, archive: false });
@@ -6435,6 +6447,8 @@ function bindNature() {
   $('natGrid').onclick = (e) => {
     // 刚框选完：吞掉这次 click，别把框到的又取消掉
     if (NAT.marqMoved) { NAT.marqMoved = false; return; }
+    // 双击名称区是重命名；第二下 click 不再切换勾选
+    if (e.detail > 1) return;
     // 刚把卡片拖到相册：拖拽收尾偶尔会补一个 click，别顺手进了文件夹
     if (NAT.dragging) { NAT.dragging = false; return; }
     // 右下角放大镜：不切换勾选，只打开大图
@@ -6479,6 +6493,21 @@ function bindNature() {
     if (tick) tick.textContent = NAT.sel.has(id) ? '✓' : '';
     natSyncSel();
   };
+  // 双击底部名字：本机端写图片标签，相册端先存「待上传鉴定」
+  $('natGrid').ondblclick = (e) => {
+    const meta = e.target.closest('.meta');
+    if (!meta) return;
+    const card = meta.closest('.card');
+    if (!card) return;
+    if (NAT.side === 'album') {
+      const id = card.dataset.id;
+      if (id) openNameEditor(NAT_KEY + id, meta);
+    } else {
+      const p = card.dataset.p;
+      if (p) openNameEditor(p, meta);
+    }
+  };
+
   // 框选 + 全选 / 清空（本机文件夹与相册照片两个模式都适用）
   bindNatMarquee();
   if ($('natSelAll')) $('natSelAll').onclick = () => natSelectAll();
