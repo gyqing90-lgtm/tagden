@@ -229,7 +229,7 @@ button { cursor: pointer; }
   background: var(--card);
   flex-wrap: wrap;
 }
-.crumbs { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; }
+.crumbs { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1 1 260px; }
 .crumbs span {
   font-size: 12px;
   color: var(--ink-3);
@@ -237,7 +237,10 @@ button { cursor: pointer; }
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.tools { display: flex; align-items: center; gap: 8px; }
+/* flex 行内部允许换行：窗口窄时按钮组折到下一行，而不是把彼此挤成竖排（坑③） */
+.tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+/* .seg 是 div，默认会被 flex 收缩压扁 → 里面的中文逐字换行成竖排 */
+.tools > .seg { flex: 0 0 auto; }
 
 button.ghost {
   padding: 6px 11px;
@@ -270,6 +273,8 @@ button.wide { width: 100%; padding: 10px; margin-top: 10px; }
   background: #fff;
   color: var(--ink-2);
   font-size: 12.5px;
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 .seg button + button { border-left: 1px solid var(--line); }
 .seg button.on { background: var(--green-l); color: var(--green); font-weight: 600; }
@@ -1610,6 +1615,26 @@ body.resizing {
 /* 站点上的照片张数多，卡片小一点，一屏能多看几张 */
 .nat-photos .grid { grid-template-columns: repeat(auto-fill, minmax(152px, 1fr)); }
 
+/* 本机端：照片 / 子文件夹可以直接拖到右边相册上传 */
+.nat-drag-hint { font-size: 11.5px; color: var(--ink-3); }
+.nat-photos .card[draggable="true"] { cursor: grab; }
+.nat-photos .card[draggable="true"]:active { cursor: grabbing; }
+.nat-photos .card.folder .thumb { cursor: grab; }
+.nat-drag-mark {
+  position: absolute;
+  right: 6px; bottom: 6px;
+  width: 19px; height: 19px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, .92);
+  color: var(--green-d);
+  font-size: 12px;
+  line-height: 1;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, .14);
+  pointer-events: none;
+}
+
 /* 相册照片上的识别结果：和站点原有名字一致标绿、不一致标黄、认不出来标红 */
 .nat-photos .card .idr {
   margin-top: 1px;
@@ -1649,7 +1674,7 @@ body.resizing {
 .nat-sel:disabled { color: var(--ink-3); background: var(--line-soft); }
 
 /* 标注页那一组「移动到自然在线相册」 */
-.nat-to { display: flex; align-items: center; gap: 6px; position: relative; }
+.nat-to { display: flex; align-items: center; gap: 6px; position: relative; flex: 0 0 auto; }
 .nat-to select { max-width: 168px; }
 .nat-to-new {
   position: absolute;
@@ -2431,3 +2456,125 @@ body.resizing {
 .nw-row-stat.ok { color: var(--green-d, #2f6b45); }
 .nw-row-stat.bad { color: #b3402f; }
 .nw-err { font-size: 12px; color: #b3402f; min-height: 18px; margin-top: 8px; line-height: 1.5; }
+
+/* ---------- 标注页的「本机端 / 相册端」 ----------
+ * 右侧面板两套脚注：本机端是「写入图片 + 重命名」，相册端是「写回鉴定」。
+ * 用 #panel 上的 nat-mode 开关，别让两套同时露出来。
+ */
+#panel.nat-mode .only-local { display: none !important; }
+#panel:not(.nat-mode) .only-nat { display: none !important; }
+.nat-write-hint { font-size: 11.5px; line-height: 1.55; margin-top: 6px; }
+
+/* 相册端左栏：相册列表 */
+.album-rail { padding: 6px; overflow: auto; flex: 1 1 auto; }
+.album-rail .ar-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+.album-rail .ar-item:hover { background: #f3f6f2; }
+.album-rail .ar-item.on { background: #e9f1ea; color: var(--green-d); font-weight: 600; }
+.album-rail .ar-item .ttl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.album-rail .ar-item .cnt { margin-left: auto; font-size: 11.5px; color: var(--ink-3); flex: 0 0 auto; }
+.album-rail .ar-empty { padding: 16px 8px; font-size: 12.5px; line-height: 1.7; color: var(--ink-3); }
+
+/* 相册端卡片上的识别结果行：和自然在线页那张卡一个样子，
+   但那边样式挂在 .nat-photos 下，标注页这里要单独给一份 */
+.grid .card .idr {
+  margin-top: 1px;
+  font-size: 11.5px;
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--ink-3);
+}
+.grid .card .idr.ok { color: var(--green); }
+.grid .card .idr.new { color: var(--amber); }
+.grid .card .idr.bad { color: var(--red); }
+.grid .card .idr .spin {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 4px;
+  border: 1px solid var(--line);
+  border-top-color: var(--green);
+  border-radius: 50%;
+  animation: spin .8s linear infinite;
+  vertical-align: -1px;
+}
+
+/* ---------- 左栏「本机端 / 相册端」切换（从右栏工具条挪过来的） ----------
+ * 放在左栏最顶部，占满宽度做成两个大 tab；下面再接「文件夹」或「自然在线相册」。
+ * 之前放在 .tools 里，窗口一窄就被挤到几十像素宽、中文变成竖排。 */
+.rail-src { padding: 10px 10px 2px; flex: 0 0 auto; }
+.rail-src .seg { width: 100%; }
+.rail-src .seg button { flex: 1 1 0; text-align: center; padding: 7px 8px; font-size: 12.5px; white-space: nowrap; }
+
+/* 自然在线页：鉴定相关的两个入口 */
+button.accent { border-color: #b9d0ee; background: #f0f6ff; color: #2b5fa8; }
+button.accent:hover:not(:disabled) { border-color: #7ea8de; background: #e4efff; }
+button.accent:disabled { opacity: .55; }
+.nat-acts button b { font-weight: 700; }
+
+/* 相册端右栏：写入鉴定 + 重新鉴定上传 两个按钮并排，别被拉成一样宽 */
+.foot-row #natReIdShortcut { flex: 0 0 auto; width: auto; white-space: nowrap; font-size: 12.5px; padding: 10px 12px; }
+
+/* 卡片上的「待上传鉴定」标记 */
+.grid .card .idr.pending { color: #2b5fa8; background: #f0f6ff; border-color: #d6e5fa; }
+
+/* 写回鉴定面板里「移除这条记录」的小按钮 */
+.nw-row-del { border: 0; background: transparent; color: var(--ink-3); cursor: pointer; font-size: 14px; line-height: 1; padding: 4px 2px; }
+.nw-row-del:hover { color: var(--red); }
+
+/* ---------- 来源统一到左栏之后的几处补充 ---------- */
+/* 统计分析 / 按分类归档只认本机文件夹：相册端按钮灰掉，鼠标停上去有说明 */
+.rail-src .seg button:disabled { opacity: .42; cursor: not-allowed; background: var(--line-soft); color: var(--ink-3); }
+.rail-src .seg button.src-locked:hover { background: var(--line-soft); color: var(--ink-3); }
+/* 标注页「批量鉴定」只在相册端出现：flex 容器里 [hidden] 要显式压掉 */
+#browseView .tools > button[hidden] { display: none !important; }
+/* 评分页右上角的来源标记：和 AI 状态同一行的浅色小字，加个淡底区分 */
+.sc-actrow #scSource { flex: 0 0 auto; padding: 2px 8px; border-radius: 10px; background: var(--green-l); color: var(--green); font-size: 12px; }
+
+/* ---------- 卡片：点缩略图看大图 / 双击名称区手填名字 ---------- */
+.grid .card .thumb { cursor: zoom-in; }
+.grid .card .tick { cursor: pointer; }
+.grid .card .meta { cursor: text; }
+/* 双击名称区弹出来的小编辑器：贴在卡片下面，不改卡片本身 */
+.name-edit {
+  position: fixed; width: min(310px, 92vw); z-index: 90;
+  background: #fff; border: 1px solid var(--line); border-radius: 12px;
+  box-shadow: 0 16px 40px rgba(16, 32, 48, .22); padding: 12px 13px;
+}
+.name-edit .ne-head { display: flex; flex-direction: column; gap: 2px; margin-bottom: 8px; font-size: 13px; }
+.name-edit .ne-head span { font-size: 11px; color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ne-field { display: flex; align-items: center; gap: 8px; margin: 6px 0; font-size: 12px; }
+.ne-field span { width: 48px; flex: 0 0 auto; color: var(--ink-3); }
+.ne-field input { flex: 1; min-width: 0; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; font-size: 13px; }
+.ne-tip { font-size: 11px; color: var(--ink-3); line-height: 1.6; margin: 6px 0 9px; }
+.ne-acts { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* ---------- 物种名核对 ---------- */
+.sheet.nc { width: min(760px, 94vw); }
+.nc-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 12px; color: var(--ink-3); margin-bottom: 8px; }
+.nc-bar #ncSummary { flex: 1 1 240px; }
+.nc-list { max-height: 52vh; overflow: auto; border: 1px solid var(--line); border-radius: 10px; }
+.nc-row { padding: 8px 10px; border-bottom: 1px solid var(--line); }
+.nc-row:last-child { border-bottom: 0; }
+.nc-row.dim { opacity: .64; }
+.nc-row-file { font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nc-row-cur { font-size: 11px; color: var(--ink-3); margin: 2px 0 5px; }
+.nc-row-fields { display: flex; gap: 8px; flex-wrap: wrap; }
+.nc-row-fields label { flex: 1 1 210px; display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--ink-3); }
+.nc-row-fields label span { width: 38px; flex: 0 0 auto; }
+.nc-row-fields input { flex: 1; min-width: 0; padding: 5px 7px; border: 1px solid var(--line); border-radius: 7px; font-size: 12.5px; }
+.nc-row-note { font-size: 11px; color: var(--ink-3); margin-top: 4px; line-height: 1.5; }
+.nc-row-note.ok { color: var(--green); }
+.nc-row-note.warn { color: #b26a00; }
+.nc-pick { width: 100%; margin-top: 5px; padding: 4px 6px; border: 1px solid var(--line); border-radius: 7px; font-size: 12px; }
+.nc-err { font-size: 12px; color: var(--red); min-height: 18px; margin-top: 6px; }

@@ -7,6 +7,8 @@
  *   node build-exe.js 0.4.2           指定版本
  *   node build-exe.js --bump minor    递增次版本号
  *   node build-exe.js --out dist      换个输出目录
+ *   node build-exe.js --win-runtime .cache/node-win-x64/node.exe
+ *                                     在 mac / linux 上交叉打 Windows exe（运行时版本必须同当前 node）
  *
  * 产物默认就放在项目根目录：`物种标注工坊.exe`。
  * 这么放是有意的 —— 程序读同级的 data/，放在这儿正好接着用你现有的账号配置；
@@ -23,6 +25,8 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { execFileSync } = require('node:child_process');
 const { buildBundle, SEA_ASSETS } = require('./build/bundle');
+const delta = require('./lib/delta');
+const { resolvePublicKey, fingerprint } = require('./build/signing');
 
 const ROOT = __dirname;
 const BUILD = path.join(ROOT, '.build');
@@ -52,6 +56,42 @@ function resolveVersion(argv) {
   if (bump === 'major') return `${a + 1}.0.0`;
   if (bump === 'minor') return `${a}.${b + 1}.0`;
   return `${a}.${b}.${c + 1}`;
+}
+
+/**
+ * 打包用的运行时：正常就是当前这个 node（Windows 上跑脚本时的 process.execPath）。
+ * 在 mac / linux 上交叉打 Windows exe 时，得另给一份 node.exe：
+ *   --win-runtime <路径>  >  环境变量 TAGDEN_WIN_RUNTIME  >  .cache/node-win-x64/node.exe
+ * SEA 的 blob 和运行时必须是同一个 node 版本，版本不一致注入出来也是废的，所以下面会核对。
+ */
+function resolveRuntime(argv) {
+  const idx = argv.indexOf('--win-runtime');
+  const explicit = (idx >= 0 && argv[idx + 1]) || process.env.TAGDEN_WIN_RUNTIME || '';
+  const local = path.join(ROOT, '.cache', 'node-win-x64', 'node.exe');
+  let rt = '';
+  if (explicit) rt = path.resolve(ROOT, explicit);
+  else if (process.platform === 'win32') rt = process.execPath;
+  else if (fs.existsSync(local)) rt = local;
+
+  if (!rt || !fs.existsSync(rt)) {
+    throw new Error(
+      `在 ${process.platform} 上打 Windows exe 需要一份 node.exe：\n` +
+        `  下载 https://nodejs.org/dist/v${process.versions.node}/win-x64/node.exe\n` +
+        `  放到 .cache/node-win-x64/node.exe，或用 --win-runtime <路径> 指定。`,
+    );
+  }
+
+  const buf = fs.readFileSync(rt);
+  if (buf[0] !== 0x4d || buf[1] !== 0x5a) {
+    throw new Error(`${rt} 不是 Windows 可执行文件（没有 MZ 头），换一份 node.exe 再来。`);
+  }
+  if (buf.indexOf(Buffer.from(process.versions.node, 'utf8')) < 0) {
+    throw new Error(
+      `运行时版本和当前 node（v${process.versions.node}）对不上：\n` +
+        `  SEA 的 blob 必须和运行时同版本，请换 v${process.versions.node} 的 win-x64 node.exe。`,
+    );
+  }
+  return rt;
 }
 
 function resolveOutDir(argv) {
@@ -93,8 +133,13 @@ function main() {
   const exePath = path.join(outDir, EXE_NAME);
   const updateUrl = resolveUpdateUrl(argv);
   const notes = resolveNotes(argv);
+  const runtimePath = resolveRuntime(argv);
+  const updatePublicKey = resolvePublicKey(ROOT, argv);
+  const keyId = updatePublicKey ? fingerprint(updatePublicKey) : '';
 
   console.log(`→ 版本 v${version}${updateUrl ? `，更新源 ${updateUrl}` : '（未配置更新源）'}`);
+  if (updatePublicKey) console.log(`→ 更新签名公钥 ${fingerprint(updatePublicKey)}（本版强制验签）`);
+  else console.log('→ 未配置 update-pubkey.pem：更新只校验 SHA-256（建议先跑 tools/update-keygen.js）');
   console.log(`→ 输出 ${exePath}`);
 
   fs.rmSync(BUILD, { recursive: true, force: true });
@@ -106,6 +151,9 @@ function main() {
     name: '物种标注工坊',
     version,
     updateUrl,
+    updatePublicKey,
+    updatePublicKeyFingerprint: keyId,
+    requireSignedUpdates: Boolean(updatePublicKey),
     builtAt: new Date().toISOString(),
   });
   const mainPath = path.join(BUILD, 'main.js');
@@ -139,15 +187,15 @@ function main() {
 
   // 先写临时文件再改名：exe 正在运行时直接覆盖会 EPERM
   const TMP_PATH = path.join(outDir, `~${EXE_NAME}`);
-  console.log('→ 复制 Node 运行时');
-  fs.copyFileSync(process.execPath, TMP_PATH);
+  console.log(`→ 复制 Node 运行时（${path.relative(ROOT, runtimePath) || runtimePath}）`);
+  fs.copyFileSync(runtimePath, TMP_PATH);
 
   console.log('→ 注入 blob');
   if (!fs.existsSync(POSTJECT)) {
     throw new Error('缺少 postject，请先执行：npm install --prefix .build-tools postject');
   }
   const blobSize = fs.statSync(seaConfig.output).size;
-  const runtimeSize = fs.statSync(process.execPath).size;
+  const runtimeSize = fs.statSync(runtimePath).size;
 
   /* postject 把整个 exe 读进 libpe 的 WASM 堆，堆要涨到七八百 MB；机器一忙
    * 就会偶发 Array buffer allocation failed / Aborted()。同一份输入重跑几次
@@ -160,7 +208,7 @@ function main() {
     if (attempt > 1) {
       console.log(`  注入失败（第 ${attempt - 1} 次），重新复制运行时再试…`);
       fs.rmSync(TMP_PATH, { force: true });
-      fs.copyFileSync(process.execPath, TMP_PATH);
+      fs.copyFileSync(runtimePath, TMP_PATH);
     }
     try {
       runNode([POSTJECT, TMP_PATH, 'NODE_SEA_BLOB', seaConfig.output, '--sentinel-fuse', SENTINEL]);
@@ -236,7 +284,46 @@ function main() {
     url: versionedName,
     size: fs.statSync(exePath).size,
     sha256: digest,
+    ...(keyId ? { keyId } : {}),
   };
+
+  /* ---------- 增量补丁：给 dist/ 里每一个旧版 exe 生成一份 ----------
+   * 客户端只下载几十万字节的 patch，用当前 exe 还原出新 exe。
+   * 旧 exe 不在 dist/（比如换了台电脑只带了源码）就跳过，客户端自动回退完整包。
+   */
+  const oldExes = fs.readdirSync(DIST)
+    .map((n) => /^tagden-(\d+\.\d+\.\d+)\.exe$/.exec(n))
+    .filter(Boolean)
+    .map((m) => ({ name: m[0], from: m[1] }))
+    .filter((x) => x.from !== version);
+  if (oldExes.length) {
+    const newBuf = fs.readFileSync(exePath);
+    const deltas = [];
+    for (const old of oldExes) {
+      try {
+        const oldBuf = fs.readFileSync(path.join(DIST, old.name));
+        const patch = delta.createPatch(oldBuf, newBuf);
+        if (patch.length >= newBuf.length * 0.8) {
+          console.log(`  [i] ${old.from} → ${version} 变化太大，跳过增量补丁`);
+          continue;
+        }
+        const patchName = `tagden-${old.from}-to-${version}.patch`;
+        fs.writeFileSync(path.join(DIST, patchName), patch);
+        deltas.push({
+          from: old.from,
+          url: patchName,
+          size: patch.length,
+          sha256: crypto.createHash('sha256').update(patch).digest('hex'),
+          baseSha256: crypto.createHash('sha256').update(oldBuf).digest('hex'),
+          resultSha256: digest,
+        });
+        console.log(`  补丁 ${old.from} → ${version}  ${(patch.length / 1024).toFixed(0)} KB`);
+      } catch (err) {
+        console.log(`  [!!] ${old.from} → ${version} 生成补丁失败（不影响完整包）：${err.message}`);
+      }
+    }
+    if (deltas.length) manifest.deltas = deltas;
+  }
   fs.writeFileSync(path.join(DIST, 'latest.json'), JSON.stringify(manifest, null, 2) + '\n', 'utf8');
 
   console.log('');

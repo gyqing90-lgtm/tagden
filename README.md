@@ -1,7 +1,7 @@
 # tagden · 物种标注工坊
 
 本地批量图片识别 → 人工确认 → 物种名写回图片元数据。
-零依赖 Node（不装任何 npm 包），只监听 127.0.0.1，不上报任何数据。
+零依赖 Node（不装任何 npm 包），只监听 127.0.0.1，不上传统计或遥测；识别时只把图片按需发给你勾选的站点，统计页的行政区划是内置离线索引（[GeoNames](https://www.geonames.org/)，CC BY 4.0），不联网。
 
 ```
 node server.js               # 端口 7801，自动开浏览器
@@ -10,6 +10,33 @@ node server.js --port 8080   # 换端口
 node server.js --hub 8791    # 只认这个聚合台端口（不写则依次探 8791 / 8899 / 8792）
 
 node build-exe.js            # 打单文件 exe（补丁号 +1），产物在同目录
+```
+
+开发/回归命令（Node 22+，不需要 `npm install`）：
+
+```bash
+npm start        # 等同 node server.js
+npm run check    # 全量 node --check（server.js + lib/ + public/ + build/ + tools/）
+npm test         # node:test 回归：合并、名录、加解密、版本比较、签名、增量补丁、离线行政区划、识别缓存、打包清单
+
+TAGDEN_NO_LOGIN=1 npm start      # 跳过启动时对 iNaturalist / 多识的静默登录
+TAGDEN_NO_GEOCODE=1 npm start    # 统计页连本地行政区划标签也不加，只用文件夹名
+npm run regions                  # 重新生成 public/regions.bin（需联网下载 GeoNames 数据）
+
+# Windows 冒烟（在 Windows 上跑，不碰真实 data/）：
+powershell -ExecutionPolicy Bypass -File .\tools\smoke-win.ps1 -Exe .\tagden-0.6.25.exe
+```
+
+发布签名（首次发版前做一次）：
+
+```bash
+npm run keygen    # 生成 ~/.tagden/update-signing-key.pem（私钥，别进仓库）和 update-pubkey.pem（公钥）
+npm test          # 28 项回归
+npm run build:win -- 0.6.25
+npm run build:mac -- 0.6.25
+npm run sign      # 给 dist/latest.json 与 dist-mac/latest-mac.json 签名
+npm run publish   # 上传并回读校验；配了公钥后，未签名/验签失败的清单会被拒绝
+# 发布凭据在仓库外：~/.tagden/oss.config.json，或 --config / OSS_CONFIG / OSS_* 环境变量
 ```
 
 ## 目录

@@ -49,7 +49,13 @@ const S = {
   // 重命名偏好：order=物种名在前/在后/只要物种名，pick=中文/学名/中文+拉丁/拉丁+中文，
   // suffix=「只要物种名」时自己填的后缀（留空则重名由服务端加 _2、_3…）
   opt: { rename: false, order: 'first', pick: 'cn', suffix: '' },
+  // 照片从哪来：local=本机文件夹，album=自然在线账号里的相册（走 S.files 的伪文件）
+  mode: 'local',
+  albumPick: null, // 相册端右侧面板选中的候选
+  localSnap: null, // 切到相册端时存的本机快照，切回来原样还回去
 };
+// jsdom 验收要拿得到状态（和 SCR / NAT 一个理由）
+if (typeof window !== 'undefined') window.S = S;
 
 /* ---------------- 基础 ---------------- */
 
@@ -77,12 +83,19 @@ async function api(path, opts) {
 const post = (path, body) =>
   api(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
 
-/** 路径太长时只留盘符和最后两级，中间省略 */
+/** 这条路径是不是 Windows 形态（盘符 / UNC）；mac、Linux 一律按 POSIX 处理 */
+function isWinPath(p) {
+  const s = String(p || '');
+  return /^[A-Za-z]:[\\/]/.test(s) || /^[A-Za-z]:$/.test(s) || /^\\\\/.test(s);
+}
+
+/** 路径太长时只留根和最后两级，中间省略；分隔符按平台来，mac 上别显示成反斜杠 */
 function shortenPath(p) {
   if (p.length <= 46) return p;
   const parts = String(p).split(/[\\/]/).filter(Boolean);
   if (parts.length <= 3) return p;
-  return `${parts[0]}\\…\\${parts.slice(-2).join('\\')}`;
+  const tail = parts.slice(-2);
+  return isWinPath(p) ? `${parts[0]}\\…\\${tail.join('\\')}` : `/…/${tail.join('/')}`;
 }
 
 const kb = (n) => (n == null ? '—' : n > 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.round(n / 1024)} KB`);
@@ -171,11 +184,30 @@ function updateRenamePreview() {
 
 /* ---------------- 启动 ---------------- */
 
+/**
+ * 启动时选哪个文件夹：
+ *  mac 打包版第一次跑时 cwd 在 xxx.app/Contents/MacOS，别把程序包内部当照片目录；
+ *  上次的目录被删、外接盘拔了、或配置从 Windows 带过来，也别卡在空界面。
+ *  先用最轻的 /api/dirs 探一下存在性，再决定真正加载谁。
+ */
+async function pickStartDir() {
+  const last = String(S.state.lastDir || '');
+  const bad = !last || /\.app[/\\]Contents[/\\]MacOS/i.test(last) || (/[\\]/.test(last) && !isWinPath(last));
+  const cands = [...(bad ? [] : [last]), ...(S.state.places || []).slice(0, 2).map((p) => p.path)].filter(Boolean);
+  for (const d of cands) {
+    try {
+      await api(`/api/dirs?path=${enc(d)}`);
+      return d;
+    } catch { /* 这个目录打不开，换下一个 */ }
+  }
+  return cands[0] || last;
+}
+
 async function boot() {
   try {
     S.state = await api('/api/state');
   } catch (err) {
-    document.body.innerHTML = `<div style="padding:40px;font:14px/1.7 'Microsoft YaHei'">连不上本机服务：${err.message}<br>请在项目目录里运行 <code>node server.js</code></div>`;
+    document.body.innerHTML = `<div style="padding:40px;font:14px/1.7 'Microsoft YaHei'">连不上本机服务：${esc(err.message)}<br>请在项目目录里运行 <code>node server.js</code></div>`;
     return;
   }
   renderPresets();
@@ -200,6 +232,7 @@ async function boot() {
   bindZoom();
 
   bindToolbar();
+  bindNameCheck();
   bindArchiveSheet();
   bindArchiveTab();
   bindTree();
@@ -209,10 +242,11 @@ async function boot() {
   bindTaxoTip();
   bindGutters();
   loadTree();
-  await loadDir(S.state.lastDir || S.state.places[0]?.path);
+  await loadDir(await pickStartDir());
   // 标注页的「自然在线相册」下拉：启动后静默拉一次，别阻塞主界面
   setTimeout(() => {
     natEnsureAlbums();
+    natRenamesLoad();
     scLoad();
     api('/api/score/remote').then((r) => { SCR.remote = r.items || {}; }).catch(() => {});
   }, 1200);
@@ -372,11 +406,17 @@ const T = {
   sel: '', // 当前正在看的目录
 };
 
-/** 统一成「E:\a\b」：盘符大写、反斜杠，免得同一个文件夹因为大小写不同变成两个节点 */
+/** 统一成「E:\a\b」或「/Users/a/b」：同一个文件夹不因大小写/分隔符不同变成两个节点。
+ *  Windows 盘符大写、分隔符统一 `\`；mac/Linux 统一 `/`，并把老版本误写的 `\` 纠正回来。
+ *  （早期版本无条件把 / 换成 \\，mac 上整棵树点不开，就是栽在这儿。） */
 function normPath(p) {
-  let s = String(p || '').replace(/\//g, '\\');
-  if (/^[a-z]:/i.test(s)) s = s[0].toUpperCase() + s.slice(1);
-  return s;
+  const s = String(p || '');
+  if (isWinPath(s)) {
+    const w = s.replace(/\//g, '\\');
+    return /^[a-z]:/i.test(w) ? w[0].toUpperCase() + w.slice(1) : w;
+  }
+  const u = s.replace(/\\/g, '/').replace(/\/{2,}/g, '/');
+  return u.length > 1 ? u.replace(/\/+$/, '') : u;
 }
 
 const ICON_DRIVE =
@@ -477,14 +517,26 @@ async function revealInTree(dir) {
   T.sel = target;
   if (!T.drives.length) return;
 
-  const m = target.match(/^([A-Z]:\\)(.*)$/);
-  const root = m ? m[1] : `${target.slice(0, 1)}\\`;
-  const rest = m ? m[2] : '';
-  const parts = rest.split('\\').filter(Boolean);
+  // 先找「离目标最近的那个根」：Windows 的根是 C:\ D:\，mac 的根是
+  // 个人文件夹 / 外接盘 / 整台电脑(/)，不能一律按盘符或 / 从头算。
+  let root = null;
+  for (const d of T.drives) {
+    const r = normPath(d.path);
+    const sep = isWinPath(r) ? '\\' : '/';
+    const hit = target === r || (r.endsWith(sep) ? target.startsWith(r) : target.startsWith(r + sep));
+    if (hit && (!root || r.length > root.length)) root = r;
+  }
+  if (!root) {
+    renderTree();
+    return;
+  }
+
+  const sep = isWinPath(root) ? '\\' : '/';
+  const parts = target.slice(root.length).split(/[\\/]/).filter(Boolean);
   const chain = [root];
   let cur = root;
   for (const part of parts) {
-    cur = cur.endsWith('\\') ? cur + part : `${cur}\\${part}`;
+    cur = cur.endsWith(sep) ? cur + part : `${cur}${sep}${part}`;
     chain.push(cur);
   }
   // 只展开祖先：当前这一层在中间已经展示内容了，左边不必再展开一层
@@ -603,8 +655,12 @@ async function loadDir(dir) {
     // 在「统计分析」/「按分类归档」标签页时，换了文件夹就把范围切成新文件夹
     if (S.tab === 'stats') statsLanding();
     else if (S.tab === 'archive') runArchiveTab();
-    // 自然在线页正开在「本机文件夹」时，跟着换成新文件夹的照片
-    else if (S.tab === 'nature') { if (NAT.side === 'local') renderNatLocal(); }
+    // 自然在线页：点左栏文件夹 / 树节点就是在看本机，切回本机视图并换照片
+    else if (S.tab === 'nature') {
+      NAT.side = 'local';
+      syncNatSideUI(false);
+      renderNatLocal();
+    }
     // 换了文件夹，评分页的缓存跟着失效；当前就在评分页就立刻重读
     SCR.dir = '';
     SCR.sel.clear();
@@ -818,6 +874,8 @@ function badgeOf(f) {
  * 现在选中、识别中、标签补全都走这里，动的只有一个 DOM 节点。
  */
 function patchCard(p) {
+  // 相册照片（nat: 前缀）走相册端那份：本机这边没有 byPath 记录
+  if (isNatKey(p)) return patchAlbumCard(p);
   const el = S.els.get(p);
   const f = S.byPath.get(p);
   if (!el || !f) return;
@@ -874,13 +932,13 @@ function folderCardHtml(d) {
 
 function cardHtml(f) {
   return `<div class="card${S.sel.has(f.path) ? ' sel' : ''}${S.active === f.path ? ' active' : ''}" data-p="${esc(f.path)}">
-        <div class="thumb">
+        <div class="thumb" title="单击看大图；点左上角圆圈勾选">
           <img loading="lazy" decoding="async" class="${rotCls(f.orient)}" src="/img?path=${enc(f.path)}&amp;thumb=1" alt="">
-          <span class="tick">${S.sel.has(f.path) ? '✓' : ''}</span>
+          <span class="tick" title="单击勾选">${S.sel.has(f.path) ? '✓' : ''}</span>
           ${badgeOf(f)}
           ${scoreBadge(f)}
         </div>
-        <div class="meta"><div class="nm" title="${esc(f.name)}">${esc(f.name)}</div><div class="sz">${kb(f.size)}</div></div>
+        <div class="meta" title="单击勾选；双击手写中文名 / 拉丁名"><div class="nm" title="${esc(f.name)}">${esc(f.name)}</div><div class="sz">${kb(f.size)}</div></div>
       </div>`;
 }
 
@@ -905,6 +963,19 @@ function pageView() {
 
 /** 换页：滚回顶部再重画，否则会停在上一页的滚动位置 */
 function gotoPage(n) {
+  // 相册端的分页在站点侧：页码交给 NAT，重新拉一页
+  if (S.mode === 'album') {
+    const size = NAT.size || 120;
+    const pages = Math.max(1, Math.ceil(NAT.total / size));
+    const t = Math.min(Math.max(1, n), pages);
+    if (t === NAT.page) return;
+    NAT.page = t;
+    S.sel.clear();
+    S.active = null;
+    $('grid').scrollTop = 0;
+    loadAlbumPhotos();
+    return;
+  }
   const v = pageView();
   const target = Math.min(Math.max(1, n), v.pages);
   if (target === S.page) return;
@@ -941,6 +1012,11 @@ function renderPager(v) {
  * 「点一下重建 2000 张」的问题也就不存在了。
  */
 function render() {
+  // 相册端走自己那套（图片在站点上，没有文件夹、没有标签），网格和翻页都另算
+  if (S.mode === 'album') {
+    renderAlbum();
+    return Promise.resolve(++renderSeq);
+  }
   const seq = ++renderSeq;
   const view = pageView();
   const list = view.items;
@@ -957,16 +1033,7 @@ function render() {
     if (p) S.els.set(p, el);
   }
 
-  grid.onclick = (e) => {
-    const folder = e.target.closest('.card.folder');
-    if (folder) {
-      loadDir(folder.dataset.d);
-      return;
-    }
-    const card = e.target.closest('.card');
-    if (!card) return;
-    toggle(card.dataset.p);
-  };
+  bindGridEvents(grid, true);
 
   updateDirStat();
   renderPager(view);
@@ -1004,9 +1071,437 @@ function updateCount() {
   const c = $('selCount');
   if (c) c.textContent = n;
   btn.disabled = n === 0 || S.queue > 0;
-  // 「自然在线」页的上传按钮、标注页的「移动到相册」都跟着这里的勾选数走
+  // 「自然在线」页的上传按钮跟着这里的勾选数走
   if ($('natUpBtn')) natSyncUpBtn();
-  if ($('tagNatBtn')) natSyncTagBtn();
+  if ($('tagBatchBtn')) $('tagBatchBtn').disabled = n === 0 || S.mode !== 'album';
+}
+
+/* ---------------- 卡片交互：点图看大图 / 双击名字手填 / 物种名核对 ----------------
+ * 单击缩略图 = 看大图；左上角小圆圈、名称区 = 勾选；双击名称区 = 手填中文名/拉丁名。
+ * 勾选做成 220ms 延迟，是为了让双击的第二下不会顺手把勾去掉再勾回来。
+ */
+const NAME_EDIT = { box: null, timer: 0, onDoc: null };
+const NC = { rows: [], targets: [], mode: 'local', applying: false };
+
+const looksLatin = (s) => /^[A-Za-z][A-Za-z.\- ]{2,}$/.test(String(s || '').trim());
+const PAIR_CAPTURE_RE = /(?:^|[^A-Za-z-])([A-Za-z][A-Za-z-]{2,})\s+([a-z][A-Za-z-]{1,})/;
+// 调查批次、相机默认名里的中文不是物种名，别拿去反查学名
+const GENERIC_CN_RE = /调查|照片|样地|样方|采集|记录|第|图片|图库|未命名|批次|截图/;
+
+/** 从文件名里拆出中文名 / 学名；和服务端同口径，但纯中文名（没有学名）也认 */
+function parseSpeciesPair(name) {
+  const base = fileNameText(name);
+  let latin = '';
+  for (const g of base.match(PAREN_GROUP_RE) || []) {
+    const inner = g.replace(/^[（(]/, '').replace(/[)）]$/, '').trim();
+    if (LATIN_WORD_RE.test(inner)) { latin = inner; break; }
+  }
+  if (!latin) {
+    const m = base.replace(PAREN_GROUP_RE, ' ').match(PAIR_CAPTURE_RE);
+    if (m) latin = `${m[1]} ${m[2]}`;
+  }
+  if (!latin) {
+    const m = base.match(CN_THEN_LATIN_RE);
+    if (m) latin = m[1];
+  }
+  const cnMatch = base.replace(PAREN_GROUP_RE, ' ').match(/[\u4e00-\u9fa5·]{2,}/);
+  const cn = cnMatch && !GENERIC_CN_RE.test(cnMatch[0]) ? cnMatch[0] : '';
+  return { cn, latin };
+}
+
+/** 一张照片现在的物种名：站点/标签优先，文件名兜底；相册端还要读本机待上传的鉴定 */
+function speciesPairOf(f) {
+  let cn = '';
+  let latin = '';
+  if (isNatKey(f.path)) {
+    const rec = NAT.renames.get(String(f.path).slice(NAT_KEY.length));
+    if (rec && rec.status !== 'done') {
+      cn = String(rec.chinese || '').trim();
+      latin = String(rec.latin || '').trim();
+    }
+    const p = f.nat || {};
+    if (!cn) cn = String(p.cname || '').trim();
+    if (!latin) latin = String(p.lname || '').trim();
+  } else {
+    const lab = S.labels.get(f.path);
+    if (lab) {
+      const kws = (lab.kw || []).map((x) => String(x).trim()).filter(Boolean);
+      latin = kws.find(looksLatin) || '';
+      cn = kws.find((x) => !looksLatin(x)) || '';
+      if (!cn && !looksLatin(lab.title)) cn = String(lab.title || '').trim();
+      if (!latin && looksLatin(lab.title)) latin = String(lab.title || '').trim();
+    }
+  }
+  const ff = parseSpeciesPair(f.name);
+  if (!latin) latin = ff.latin;
+  // 标签里已经有学名、文件名却只有中文时，不拿文件名里的中文硬凑成一个物种
+  if (!cn && (!latin || ff.latin)) cn = ff.cn;
+  return { cn, latin };
+}
+
+/** 只把某张图设为「当前」并刷右栏，不动勾选集合 */
+function activateCard(p) {
+  const prev = S.active;
+  S.active = p;
+  if (prev && prev !== p) patchCard(prev);
+  patchCard(p);
+  openPanel(p);
+}
+
+/** 本机端 / 相册端共用一套网格事件 */
+function bindGridEvents(grid, withFolders) {
+  grid.onclick = (e) => {
+    if (withFolders) {
+      const folder = e.target.closest('.card.folder');
+      if (folder) { loadDir(folder.dataset.d); return; }
+    }
+    const card = e.target.closest('.card');
+    if (!card || !card.dataset.p) return;
+    const p = card.dataset.p;
+    if (e.target.closest('.thumb')) {
+      // 小圆圈和状态徽标仍是勾选；点照片本身 = 看大图
+      if (e.target.closest('.tick') || e.target.closest('.badge')) { toggle(p); return; }
+      activateCard(p);
+      openZoom();
+      return;
+    }
+    if (e.detail > 1) return; // 双击的第二下不要重复勾选
+    if (NAME_EDIT.timer) clearTimeout(NAME_EDIT.timer);
+    NAME_EDIT.timer = setTimeout(() => { NAME_EDIT.timer = 0; toggle(p); }, 220);
+  };
+  grid.ondblclick = (e) => {
+    const meta = e.target.closest('.meta');
+    if (!meta) return;
+    const card = meta.closest('.card');
+    if (!card || !card.dataset.p || card.classList.contains('folder')) return;
+    if (NAME_EDIT.timer) { clearTimeout(NAME_EDIT.timer); NAME_EDIT.timer = 0; }
+    openNameEditor(card.dataset.p, meta);
+  };
+}
+
+/* ---------------- 双击名称区：自己输入中文名 / 拉丁名 ---------------- */
+
+function closeNameEditor() {
+  if (NAME_EDIT.onDoc && typeof document !== 'undefined') {
+    document.removeEventListener('click', NAME_EDIT.onDoc);
+  }
+  NAME_EDIT.onDoc = null;
+  if (NAME_EDIT.box) NAME_EDIT.box.remove();
+  NAME_EDIT.box = null;
+}
+
+function neField(labelText, cls, value, placeholder) {
+  const wrap = document.createElement('label');
+  wrap.className = 'ne-field';
+  const span = document.createElement('span');
+  span.textContent = labelText;
+  const input = document.createElement('input');
+  input.className = cls;
+  input.type = 'text';
+  input.value = value;
+  input.placeholder = placeholder;
+  input.spellcheck = false;
+  wrap.appendChild(span);
+  wrap.appendChild(input);
+  return { wrap, input };
+}
+
+function openNameEditor(p, anchor) {
+  closeNameEditor();
+  const f = S.byPath.get(p) || (S.files || []).find((x) => x.path === p);
+  if (!f) return;
+  const album = isNatKey(p);
+  const pair = speciesPairOf(f);
+  const box = document.createElement('div');
+  box.className = 'name-edit';
+  const head = document.createElement('div');
+  head.className = 'ne-head';
+  const strong = document.createElement('b');
+  strong.textContent = album ? '填写鉴定名（待上传）' : '填写物种名';
+  const sub = document.createElement('span');
+  sub.textContent = f.name;
+  sub.title = f.name;
+  head.appendChild(strong);
+  head.appendChild(sub);
+  box.appendChild(head);
+  const cn = neField('中文名', 'ne-cn', pair.cn, '如：碧翠凤蝶');
+  const la = neField('拉丁名', 'ne-la', pair.latin, '如：Papilio bianor');
+  box.appendChild(cn.wrap);
+  box.appendChild(la.wrap);
+  const tip = document.createElement('div');
+  tip.className = 'ne-tip';
+  tip.textContent = album
+    ? '保存后先存到本机「待上传鉴定」，再点「重新鉴定上传」同步到自然在线；不上传图片。'
+    : '保存会写进图片标签，不改文件名、不移动照片。';
+  box.appendChild(tip);
+  const acts = document.createElement('div');
+  acts.className = 'ne-acts';
+  const cancel = document.createElement('button');
+  cancel.className = 'ghost mini ne-cancel';
+  cancel.textContent = '取消';
+  const save = document.createElement('button');
+  save.className = 'primary mini ne-save';
+  save.textContent = '保存';
+  acts.appendChild(cancel);
+  acts.appendChild(save);
+  box.appendChild(acts);
+  document.body.appendChild(box);
+  NAME_EDIT.box = box;
+
+  const r = anchor && anchor.getBoundingClientRect ? anchor.getBoundingClientRect() : { left: 24, bottom: 24 };
+  const vw = (typeof window !== 'undefined' && window.innerWidth) || 1280;
+  const vh = (typeof window !== 'undefined' && window.innerHeight) || 800;
+  box.style.left = `${Math.max(12, Math.min(vw - 322, Number(r.left) || 12))}px`;
+  box.style.top = `${Math.max(12, Math.min(vh - 232, (Number(r.bottom) || 60) + 6))}px`;
+
+  cancel.onclick = closeNameEditor;
+  save.onclick = () => saveNameEdit(p, f, cn.input, la.input, save);
+  box.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeNameEditor();
+    else if (e.key === 'Enter') saveNameEdit(p, f, cn.input, la.input, save);
+  });
+  NAME_EDIT.onDoc = (e) => {
+    if (NAME_EDIT.box && !NAME_EDIT.box.contains(e.target)) closeNameEditor();
+  };
+  setTimeout(() => {
+    if (NAME_EDIT.box === box && typeof document !== 'undefined') {
+      document.addEventListener('click', NAME_EDIT.onDoc);
+    }
+  }, 0);
+  if (cn.input.focus) cn.input.focus();
+}
+
+async function saveNameEdit(p, f, cnInput, laInput, saveBtn) {
+  const cn = String((cnInput && cnInput.value) || '').trim();
+  const latin = String((laInput && laInput.value) || '').trim();
+  if (!cn && !latin) { toast('中文名和拉丁名至少填一个', 2600); return; }
+  if (saveBtn) saveBtn.disabled = true;
+  try {
+    if (isNatKey(p)) {
+      const photoId = String(p).slice(NAT_KEY.length);
+      const ph = (NAT.photos || []).find((x) => String(x.photoId) === photoId) || f.nat || {};
+      const rec = {
+        photoId,
+        albumId: String((NAT.album && NAT.album.id) || ph.albumId || ''),
+        fileName: ph.fileName || ph.name || f.name || '',
+        chinese: cn, latin, nameId: '',
+        original: { cname: String(ph.cname || ''), lname: String(ph.lname || '') },
+        status: 'pending', message: '', savedAt: Date.now(),
+      };
+      const out = await post('/api/nat/renames', { records: [rec] });
+      NAT.renames = new Map((out.records || []).filter((x) => x && x.photoId).map((x) => [String(x.photoId), x]));
+      refreshPendingBadge();
+      patchAlbumCard(p);
+      toast('已写入待上传鉴定，点「重新鉴定上传」同步站点', 3600);
+    } else {
+      await post('/api/write', { path: p, cn, latin, note: '', source: '手工填写', rename: false, archive: false });
+      S.labels.set(p, { title: cn || latin, kw: [cn, latin].filter(Boolean) });
+      S.written.add(p);
+      patchCard(p);
+      updateFilterCounts();
+      if (S.active === p) openPanel(p);
+      toast('物种名已写进图片标签', 2400);
+    }
+    closeNameEditor();
+  } catch (err) {
+    if (saveBtn) saveBtn.disabled = false;
+    toast('保存失败：' + err.message, 4000);
+  }
+}
+
+/* ---------------- 物种名核对：批量补齐只有一侧的名字 ---------------- */
+
+/** 勾了就只核对勾选的；没勾核对当前这一屏（相册端是当前这一页） */
+function nameCheckTargets() {
+  const album = S.mode === 'album';
+  const all = () => {
+    if (album) return S.files || [];
+    try { return pageView().all; } catch { return S.files || []; }
+  };
+  if (S.sel.size) return all().filter((f) => S.sel.has(f.path)).slice(0, 400);
+  const onePage = () => {
+    if (album) return S.files || [];
+    try { return pageView().items; } catch { return S.files || []; }
+  };
+  return onePage().slice(0, 400);
+}
+
+function ncItemsFrom(targets) {
+  return targets.map((f) => {
+    const pair = speciesPairOf(f);
+    const lab = S.labels.get(f.path);
+    return {
+      key: f.path, fileName: f.name,
+      cn: pair.cn, latin: pair.latin,
+      labelTitle: lab ? String(lab.title || '') : '',
+      labelKeywords: lab ? (lab.kw || []).map(String) : [],
+    };
+  });
+}
+
+function ncRowHtml(r, i) {
+  const dim = r.state === 'complete' || r.state === 'empty' ? ' dim' : '';
+  const note = r.state === 'filled'
+    ? `✓ ${r.source || '名录'}补上了${r.cn ? '' : '中文名'}${r.latin ? '' : '学名'}，可再改`
+    : r.state === 'ambiguous' ? '⚠ 多个学名共用这个中文名，请从候选里挑一个'
+      : r.state === 'unresolved' ? `× ${r.note || '查不到'}，可自己填；或勾「联网补查」`
+        : r.state === 'complete' ? (r.note ? `已完整 · ${r.note}` : '中文名与学名都齐了')
+          : '没有物种名，先识别或双击卡片名称手填';
+  const cls = r.state === 'filled' ? 'ok' : (r.state === 'ambiguous' || r.state === 'unresolved') ? 'warn' : '';
+  const cand = (r.candidates || []).length
+    ? `<select class="nc-pick" data-i="${i}"><option value="">从候选里挑一个学名…</option>${r.candidates
+        .map((c) => `<option value="${esc(c)}">${esc(c)}</option>`).join('')}</select>`
+    : '';
+  return `<div class="nc-row${dim}" data-i="${i}" data-key="${esc(r.key)}">
+    <div class="nc-row-file" title="${esc(r.fileName)}">${esc(r.fileName)}</div>
+    <div class="nc-row-cur">现有：中文 ${esc(r.cn || '—')} ｜ 学名 ${esc(r.latin || '—')}</div>
+    <div class="nc-row-fields">
+      <label><span>中文名</span><input class="nc-cn" value="${esc(r.fillCn || r.cn)}" placeholder="中文名"></label>
+      <label><span>学名</span><input class="nc-la" value="${esc(r.fillLatin || r.latin)}" placeholder="学名"></label>
+    </div>
+    ${cand}
+    <div class="nc-row-note ${cls}">${esc(note)}</div>
+  </div>`;
+}
+
+function ncRender() {
+  const rows = NC.rows;
+  const s = { filled: 0, ambiguous: 0, unresolved: 0, complete: 0, empty: 0 };
+  for (const r of rows) if (s[r.state] !== undefined) s[r.state] += 1;
+  $('ncSummary').textContent =
+    `扫描 ${rows.length} 张 · 可补齐 ${s.filled} · 重名待选 ${s.ambiguous} · 查不到 ${s.unresolved} · 已完整 ${s.complete} · 无名字 ${s.empty}`;
+  $('ncList').innerHTML = rows.length
+    ? rows.slice(0, 300).map(ncRowHtml).join('') + (rows.length > 300 ? '<div class="nc-row nc-row-note">只显示前 300 张，其余请翻页或勾选后再核对</div>' : '')
+    : '<div class="empty" style="padding:16px">这一屏没有照片</div>';
+  $('ncApply').disabled = !rows.length || NC.applying;
+  $('ncTip').textContent = NC.mode === 'album'
+    ? '用内置《中国生物物种名录》离线查表：只有学名补中文、只有中文补学名；重名的列候选让你挑，查不到的可勾「联网补查」。默认核对相册当前这一页，勾了照片就只核对勾选的。确认后名字先存本机「待上传鉴定」，在自然在线页点「重新鉴定上传」才同步站点；全程不上传图片。'
+    : '用内置《中国生物物种名录》离线查表：只有学名补中文、只有中文补学名；重名的列候选让你挑，查不到的可勾「联网补查」。默认核对当前这一页，勾了照片就只核对勾选的。确认后写进图片标签，不改文件名、不移动照片；建议值可以直接改。';
+}
+
+async function nameCheckRun() {
+  if (!NC.targets.length) { $('ncErr').textContent = '这一屏没有可核对的照片'; return; }
+  const online = Boolean($('ncOnline') && $('ncOnline').checked);
+  $('ncSummary').textContent = `正在核对 ${NC.targets.length} 张…`;
+  $('ncApply').disabled = true;
+  $('ncErr').textContent = '';
+  try {
+    const out = await post('/api/species/complete', { items: ncItemsFrom(NC.targets), online });
+    NC.rows = out.items || [];
+    ncRender();
+  } catch (err) {
+    $('ncErr').textContent = '核对失败：' + err.message;
+    $('ncSummary').textContent = '核对没跑起来';
+  }
+}
+
+function openNameCheck() {
+  closeNameEditor();
+  NC.targets = nameCheckTargets();
+  NC.mode = S.mode === 'album' ? 'album' : 'local';
+  NC.rows = [];
+  NC.applying = false;
+  $('nameCheckMask').classList.add('show');
+  $('ncErr').textContent = '';
+  $('ncList').innerHTML = '';
+  $('ncApply').disabled = true;
+  if (!NC.targets.length) {
+    $('ncSummary').textContent = '这一屏没有照片，先在左边选个文件夹或相册';
+    return;
+  }
+  nameCheckRun();
+}
+
+function closeNameCheck() {
+  const m = $('nameCheckMask');
+  if (m) m.classList.remove('show');
+}
+
+/** 把弹窗里改动过的名字写回：本机端写图片标签，相册端存本机待上传鉴定 */
+async function ncApply() {
+  if (NC.applying) return;
+  const els = [...$('ncList').querySelectorAll('.nc-row')];
+  const changes = [];
+  for (const el of els) {
+    const r = NC.rows[Number(el.dataset.i)];
+    if (!r) continue;
+    const ci = el.querySelector('.nc-cn');
+    const li = el.querySelector('.nc-la');
+    const cn = String((ci && ci.value) || '').trim();
+    const latin = String((li && li.value) || '').trim();
+    if ((cn || latin) && (cn !== r.cn || latin !== r.latin)) {
+      changes.push({ key: r.key, fileName: r.fileName, cn, latin });
+    }
+  }
+  if (!changes.length) { toast('没有要写入的改动', 2200); return; }
+  const tip = NC.mode === 'album'
+    ? `确认把 ${changes.length} 张补齐的鉴定名存到本机「待上传鉴定」？\n之后在自然在线页点「重新鉴定上传」才同步到站点，不上传图片。`
+    : `确认把 ${changes.length} 张补齐的物种名写进图片标签？\n不改文件名、不移动照片。`;
+  if (!window.confirm(tip)) return;
+  NC.applying = true;
+  $('ncApply').disabled = true;
+  let ok = 0;
+  let fail = 0;
+  try {
+    if (NC.mode === 'album') {
+      const records = changes.map((c) => {
+        const photoId = String(c.key).slice(NAT_KEY.length);
+        const ph = (NAT.photos || []).find((x) => String(x.photoId) === photoId) || {};
+        return {
+          photoId,
+          albumId: String((NAT.album && NAT.album.id) || ph.albumId || ''),
+          fileName: ph.fileName || ph.name || c.fileName,
+          chinese: c.cn, latin: c.latin, nameId: '',
+          original: { cname: String(ph.cname || ''), lname: String(ph.lname || '') },
+          status: 'pending', message: '', savedAt: Date.now(),
+        };
+      });
+      const out = await post('/api/nat/renames', { records });
+      NAT.renames = new Map((out.records || []).filter((x) => x && x.photoId).map((x) => [String(x.photoId), x]));
+      refreshPendingBadge();
+      for (const c of changes) patchAlbumCard(c.key);
+      ok = changes.length;
+    } else {
+      for (const c of changes) {
+        try {
+          await post('/api/write', {
+            path: c.key, cn: c.cn, latin: c.latin, note: '', source: '物种名核对', rename: false, archive: false,
+          });
+          S.labels.set(c.key, { title: c.cn || c.latin, kw: [c.cn, c.latin].filter(Boolean) });
+          S.written.add(c.key);
+          patchCard(c.key);
+          ok += 1;
+        } catch { fail += 1; }
+      }
+      updateFilterCounts();
+      if (S.active) openPanel(S.active);
+      render();
+    }
+    toast(fail ? `已补齐 ${ok} 张，失败 ${fail} 张` : `已补齐 ${ok} 张照片的名字`, 3200);
+    closeNameCheck();
+  } catch (err) {
+    $('ncErr').textContent = '写入失败：' + err.message;
+  } finally {
+    NC.applying = false;
+    $('ncApply').disabled = false;
+  }
+}
+
+function bindNameCheck() {
+  if ($('nameCheckBtn')) $('nameCheckBtn').onclick = openNameCheck;
+  if ($('ncCancel')) $('ncCancel').onclick = closeNameCheck;
+  if ($('ncRedo')) $('ncRedo').onclick = nameCheckRun;
+  if ($('ncOnline')) $('ncOnline').onchange = nameCheckRun;
+  if ($('ncApply')) $('ncApply').onclick = ncApply;
+  if ($('ncList')) {
+    $('ncList').onchange = (e) => {
+      const sel = e.target.closest && e.target.closest('.nc-pick');
+      if (!sel || !sel.value) return;
+      const row = sel.closest('.nc-row');
+      const la = row && row.querySelector ? row.querySelector('.nc-la') : null;
+      if (la) la.value = sel.value;
+    };
+  }
 }
 
 function bindToolbar() {
@@ -1032,6 +1527,13 @@ function bindToolbar() {
   };
   bindPager();
   $('selAll').onclick = () => {
+    // 相册端：把这一页的相册照片全勾上（没有「未标注」这个概念，统统可选）
+    if (S.mode === 'album') {
+      for (const f of S.files) S.sel.add(f.path);
+      for (const f of S.files) patchAlbumCard(f.path);
+      updateCount();
+      return;
+    }
     const touched = [];
     // 「没有学名」视图里看到的每一张都是待鉴定的，直接全选；
     // 其他视图沿用「只选还没标注的」，免得把已标注的图又送去识别一遍。
@@ -1063,8 +1565,9 @@ function bindToolbar() {
  * 否则在路径框、手动填名框里按左右键会被抢去翻页，很难用。
  */
 function bindPager() {
-  $('pgPrev').onclick = () => gotoPage(S.page - 1);
-  $('pgNext').onclick = () => gotoPage(S.page + 1);
+  const curPage = () => (S.mode === 'album' ? NAT.page : S.page);
+  $('pgPrev').onclick = () => gotoPage(curPage() - 1);
+  $('pgNext').onclick = () => gotoPage(curPage() + 1);
   $('pgSize').onchange = (e) => {
     const v = Number(e.target.value);
     S.pageSize = PAGE_SIZES.includes(v) ? v : 120;
@@ -1073,6 +1576,12 @@ function bindPager() {
     } catch {}
     S.page = 1;
     $('grid').scrollTop = 0;
+    if (S.mode === 'album') {
+      NAT.size = S.pageSize || 120;
+      NAT.page = 1;
+      loadAlbumPhotos();
+      return;
+    }
     render();
   };
   document.addEventListener('keydown', (e) => {
@@ -1091,6 +1600,8 @@ function bindPager() {
 /* ---------------- 识别 ---------------- */
 
 async function runIdentify() {
+  // 相册端：走 /api/nat/identify，图和名字都在站点上
+  if (S.mode === 'album') return runIdentifyAlbum();
   const targets = [...S.sel];
   if (!targets.length) return;
   S.queue = targets.length;
@@ -1113,12 +1624,12 @@ async function runIdentify() {
   toast(`识别完成 ${done} 张`);
 }
 
-async function identifyOne(p) {
+async function identifyOne(p, opts = {}) {
   S.busy.add(p);
   patchCard(p);
   try {
     const variants = await makeVariants(p);
-    const body = { path: p, sources: S.state.current.sources, ...variants };
+    const body = { path: p, sources: S.state.current.sources, force: opts.force === true, ...variants };
     const r = await post('/api/identify', body);
     S.results.set(p, r);
     if (S.active === p) openPanel(p);
@@ -1128,6 +1639,55 @@ async function identifyOne(p) {
   } finally {
     S.busy.delete(p);
     patchCard(p);
+  }
+}
+
+/** 相册端批量识别：同一套两并发队列，识别结果按 nat:<photoId> 存进 S.results */
+async function runIdentifyAlbum() {
+  const keys = [...S.sel];
+  if (!keys.length) return toast('先勾选要识别的照片');
+  S.queue = keys.length;
+  updateCount();
+  let done = 0;
+  const queue = keys.slice();
+  const worker = async () => {
+    while (queue.length) {
+      const k = queue.shift();
+      await identifyAlbumOne(k);
+      done += 1;
+      S.queue = queue.length;
+      updateCount();
+    }
+  };
+  await Promise.all([worker(), worker()]);
+  S.queue = 0;
+  updateCount();
+  toast(`识别完成 ${done} 张`);
+}
+
+async function identifyAlbumOne(key, opts = {}) {
+  const id = key.slice(NAT_KEY.length);
+  const ph = NAT.photos.find((x) => x.photoId === id);
+  if (!ph) return;
+  S.busy.add(key);
+  patchAlbumCard(key);
+  try {
+    const variants = await natVariants(ph);
+    const r = await post('/api/nat/identify', {
+      url: ph.full || ph.thumb,
+      name: ph.fileName || '',
+      sources: S.state.current.sources,
+      force: opts.force === true,
+      ...variants,
+    });
+    S.results.set(key, r);
+    if (S.active === key) openPanel(key);
+  } catch (err) {
+    S.results.set(key, { rows: [], sites: {}, error: err.message });
+    if (S.active === key) openPanel(key);
+  } finally {
+    S.busy.delete(key);
+    patchAlbumCard(key);
   }
 }
 
@@ -1253,11 +1813,15 @@ function zoomLoad(p) {
   const f = S.byPath.get(p) || S.files.find((x) => x.path === p);
   const img = $('zoomImg');
   if (img) {
-    img.src = `/img?path=${enc(p)}`;
+    // 相册照片没有本地路径，原图要从站点的图片接口拿
+    img.src =
+      isNatKey(p) && f && f.nat
+        ? `/api/nat/img?u=${enc(f.nat.full || f.nat.thumb || '')}`
+        : `/img?path=${enc(p)}`;
     img.alt = f ? f.name : '';
   }
   if ($('zoomName')) $('zoomName').textContent = f ? f.name : p;
-  if ($('zoomIdx')) $('zoomIdx').textContent = zoomIndexText(p);
+  if ($('zoomIdx')) $('zoomIdx').textContent = S.mode === 'album' ? '' : zoomIndexText(p);
   ZOOM.path = p;
 }
 
@@ -1285,6 +1849,25 @@ function closeZoom() {
 
 /** 翻到本层筛选结果里的上一张/下一张；右侧详情和网格高亮一起跟着走 */
 function zoomStep(d) {
+  // 相册端：在「相册这一页」里翻，不掺本机那套分页换算
+  if (S.mode === 'album') {
+    const list = S.files || [];
+    if (!list.length) return;
+    let i = list.findIndex((x) => x.path === ZOOM.path);
+    if (i < 0) i = 0;
+    const j = Math.min(list.length - 1, Math.max(0, i + d));
+    if (j === i) return;
+    const p = list[j].path;
+    ZOOM.s = 1;
+    ZOOM.tx = 0;
+    ZOOM.ty = 0;
+    S.active = p;
+    patchAlbumCard(p);
+    openPanel(p);
+    zoomLoad(p);
+    zoomPaint();
+    return;
+  }
   const all = zoomList();
   if (!all.length) return;
   let i = all.findIndex((x) => x.path === ZOOM.path);
@@ -1507,6 +2090,8 @@ function panelSwapDraft(p) {
 }
 
 function openPanel(p) {
+  // 相册照片（nat:<photoId>）走相册端的面板：图片、各站、候选、写回
+  if (isNatKey(p)) return openAlbumPanel(p);
   const f = S.files.find((x) => x.path === p);
   if (!f) return;
   panelSwapDraft(p);
@@ -1534,7 +2119,7 @@ function openPanel(p) {
     list.innerHTML = `<div class="dim" style="padding:6px 2px">还没识别。勾上这张图，点右上「识别选中」。</div>`;
     $('pvVerdict').textContent = '';
   } else if (r.error) {
-    list.innerHTML = `<div class="msg err">${r.error}</div>`;
+    list.innerHTML = `<div class="msg err">${esc(r.error)}</div>`;
     $('pvVerdict').textContent = '';
   } else if (!r.rows?.length) {
     const failed = Object.entries(r.sites || {})
@@ -1546,8 +2131,12 @@ function openPanel(p) {
     $('pvVerdict').textContent = '';
   } else {
     const names = SITE_NAME();
+    // 命中本机缓存时给一条提示和「重新识别」入口，避免一次旧结果被锁 30 天
+    const cacheNote = r.cached
+      ? '<div class="dim" style="padding:2px 2px 6px;font-size:11.5px">本机缓存 · <a href="#" data-reid="1" style="color:inherit;text-decoration:underline">重新识别</a></div>'
+      : '';
     // 服务端现在回 15 行（完整结果表要用），窄面板里只列前 8，剩下的去「完整结果」看
-    list.innerHTML = r.rows
+    list.innerHTML = cacheNote + r.rows
       .slice(0, 8)
       .map((row, i) => {
         const srcs = Object.keys(row.bySite || {}).map((k) => names[k] || k).join('、');
@@ -1559,6 +2148,12 @@ function openPanel(p) {
       })
       .join('');
     list.onclick = (e) => {
+      const reid = e.target.closest('[data-reid]');
+      if (reid) {
+        e.preventDefault();
+        identifyOne(p, { force: true });
+        return;
+      }
       const b = e.target.closest('.cand');
       if (!b) return;
       [...list.children].forEach((x) => x.classList.toggle('on', x === b));
@@ -1576,7 +2171,7 @@ function openPanel(p) {
     const top = r.rows[0];
     $('inCn').value = top.cn || '';
     $('inLatin').value = top.latin || '';
-    [...list.children][0]?.classList.add('on');
+    list.querySelector('.cand')?.classList.add('on');
   }
   $('writeBtn').disabled = !($('inCn').value.trim() || $('inLatin').value.trim());
   updateRenamePreview();
@@ -1949,7 +2544,9 @@ const DP = { path: '', onPick: null };
 async function dirPickerOpen(start, onPick) {
   DP.onPick = onPick || null;
   $('dirMask').classList.add('show');
-  await dirPickerGo(start || S.dir || 'C:\\');
+  // 没有当前目录时从树根起步：mac 上没有 C:\，写死会导致选择器一打开就报错
+  const fallback = T.drives.length ? normPath(T.drives[0].path) : isWinPath(S.dir) ? 'C:\\' : '/';
+  await dirPickerGo(start || S.dir || fallback);
 }
 
 function dirPickerClose() {
@@ -3157,7 +3754,7 @@ async function checkUpdate(force = false) {
 
 function renderUpdatePrompt(r) {
   if (UPD.busy) return;
-  const size = r.size ? ` · ${mbText(r.size)} MB` : '';
+  const size = r.size ? ` · ${r.delta ? '增量包 ' : ''}${mbText(r.size)} MB` : '';
   const notes = (r.notes || '').replace(/\s+/g, ' ').trim();
   const moveTip =
     r.mode === 'bundle'
@@ -3184,9 +3781,10 @@ async function pollUpProgress() {
   try {
     const p = await fetch('/api/update/progress').then((r) => r.json());
     if (p.phase === 'downloading') {
+      const what = p.delta ? '增量补丁' : '新版';
       const text = p.total
-        ? `正在下载新版 ${mbText(p.received)} / ${mbText(p.total)} MB`
-        : `正在下载新版 ${mbText(p.received)} MB`;
+        ? `正在下载${what} ${mbText(p.received)} / ${mbText(p.total)} MB`
+        : `正在下载${what} ${mbText(p.received)} MB`;
       $('upbarText').textContent = text;
     }
   } catch {
@@ -3263,8 +3861,35 @@ function bindUpdate() {
  * 未鉴定的只给数字 + 按文件夹分组。底层喂给 lib/stats.js —— 和 bio-file 同一套统计逻辑。
  */
 
+/**
+ * 有些页面没有「相册端」这回事，进页面时把左栏的相册端锁上，并自动回到本机端；离开时解锁。
+ *   · 统计分析 / 按分类归档 —— 只处理本机文件夹
+ *   · 自然在线 —— 右边本来就有相册列表，左栏要留给本机文件夹树（拖文件夹上传要用）
+ */
+function syncSrcAvailability(tab) {
+  const statsLock = tab === 'stats' || tab === 'archive';
+  const natLock = tab === 'nature';
+  const locked = statsLock || natLock;
+  const seg = $('srcSeg');
+  if (seg) {
+    for (const b of seg.querySelectorAll('button[data-src]')) {
+      const off = locked && b.dataset.src === 'album';
+      b.disabled = off;
+      b.classList.toggle('src-locked', off);
+      b.title = off
+        ? natLock
+          ? '自然在线页右边已有相册列表，左栏相册端在这里不用切；左栏用来选本机文件夹'
+          : '统计分析 / 按分类归档只处理本机文件夹，相册端在这里不可用'
+        : b.dataset.src === 'album' ? '照片来自自然在线账号里的相册' : '照片来自本机文件夹';
+    }
+  }
+  return locked;
+}
+
 function showTab(name) {
   S.tab = name;
+  // 归档 / 统计 / 自然在线页：进页面就回到本机端（切走后不会自动跳回相册端）
+  if (syncSrcAvailability(name) && S.mode === 'album') setSource('local', { quiet: true });
   const lay = document.querySelector('.layout');
   const views = {
     annotate: $('browseView'),
@@ -3475,7 +4100,7 @@ function renderStats(d) {
   // ② 所有板块一次铺开
   html += '<div class="st-grid">';
   html += stCard('分类树', '点节点展开 / 收起', '<div class="stree-box" id="stree"></div>', 'span2');
-  html += stCard('行政区域', 'GPS 反查，没有坐标按文件夹归', stBars(dim('region'), 10));
+  html += stCard('行政区域', '离线索引；没有坐标或离城市太远按文件夹归', stBars(dim('region'), 10));
 
   html += stCard('分类层级分布', '层层包含 · 逐级细分', stHierarchy(L));
   html += stCard('按物种', '仅统计已鉴定 · Top 12', stBars(dim('species'), 12, true));
@@ -3507,6 +4132,7 @@ function renderStats(d) {
 
   html += '</div>';
   html += `<div class="un-note">共 ${d.total} 张图，其中已鉴定 ${L['已鉴定'] || 0} 张、未鉴定 ${L['未鉴定'] || 0} 张${d.truncated ? '（已达单次上限，结果不完整）' : ''}。</div>`;
+  html += '<div class="un-note" style="margin-top:2px">行政区划索引：<a href="https://www.geonames.org/" target="_blank" rel="noreferrer">GeoNames</a>（CC BY 4.0），离线内置，不联网。</div>';
 
   $('statsBody').innerHTML = html;
   renderStatsTree(d.tree);
@@ -3568,18 +4194,81 @@ const NAT = {
   sel: new Set(), // 勾选的照片 id
   res: new Map(), // photoId → 识别结果（和「标注」页那张图共用一个识别内核）
   busy: new Set(), // 正在识别的 photoId
-  idRunning: false, // 这一轮识别还没跑完
+  idRunning: false, // 这一轮识别还没跑完（自然在线页已不做识别）
+  renames: new Map(), // photoId → 本机待上传的鉴定记录（只存名字，不存图片）
   timer: null, // 上传进度轮询
   upl: null, // 当前上传任务
   marqMoved: false, // 刚框选完，紧接着那次 click 要吞掉
   visibleTotal: 0, // 当前网格里显示着的可勾选照片数（render 时更新，全选按钮态用）
 };
+// jsdom 验收要拿得到相册状态（和 SCR / S 一个理由）
+if (typeof window !== 'undefined') window.NAT = NAT;
+
+/* ---------- 本机待上传鉴定记录 ----------
+ * 相册端选好候选点「写入鉴定」先落到这里；「重新鉴定上传」再把纯名字提交给站点。
+ * 图片自始至终不参与：站点收到的只有 photoId + NameID + 中文名/学名。
+ * 和 nature-client 的 renames.json 是同一套思路，只是挪进了标注工坊的 data/。 */
+function natPendingList() {
+  return [...NAT.renames.values()].filter((r) => r && r.status !== 'done');
+}
+
+async function natRenamesLoad() {
+  try {
+    const r = await api('/api/nat/renames');
+    NAT.renames = new Map(
+      (r.records || []).filter((x) => x && x.photoId).map((x) => [String(x.photoId), x]),
+    );
+  } catch {
+    NAT.renames = new Map();
+  }
+  refreshPendingBadge();
+  return NAT.renames;
+}
+
+function refreshPendingBadge() {
+  const n = natPendingList().length;
+  for (const id of ['natPendingTag', 'natPendingCount']) {
+    const el = $(id);
+    if (el) el.textContent = String(n);
+  }
+  const btn = $('natReIdBtn');
+  if (btn) {
+    btn.title = n
+      ? `有 ${n} 条写好的鉴定待同步：只传鉴定结果，不传图片`
+      : '把本机写好的鉴定结果同步到自然在线（只传鉴定结果，不传图片）';
+  }
+}
+
+/** 自然在线页卡片：本机已写好、还没上传的鉴定（识别结果统一去标注页看） */
+function natPendingLine(p) {
+  const rec = NAT.renames.get(String(p.photoId));
+  if (!rec || rec.status === 'done') return '';
+  const nm = [rec.chinese, rec.latin].filter(Boolean).join(' ') || '（未命名）';
+  const bad = rec.status === 'failed' ? '上传失败 · ' : '';
+  return `<div class="idr pending" title="已写入本机，等「重新鉴定上传」同步到自然在线">${bad}待上传 ${esc(nm)}</div>`;
+}
 
 function natOpen() {
-  // 本地模式先把当前文件夹铺出来（还没登录也照样能看）
-  if (NAT.side === 'local') renderNatLocal();
+  // 从评分页的相册端切过来时，接着看同一个相册（分数就印在卡片上）；
+  // 其余情况停在本机文件夹：本页要靠左栏文件树选文件夹、拖子文件夹上传。
+  const keepAlbum = Boolean(NAT.album) && SCR.mode === 'album'
+    && String(SCR.albumId) === String(NAT.album.id);
+  NAT.side = keepAlbum ? 'album' : 'local';
+  syncNatSideUI(true);
+  refreshNatScores();
   if (!NAT.loaded) natStatus();
   else natSyncUpBtn();
+}
+
+/** 评分页刚写进 /api/score/remote 的结果，自然在线这边重新读一次再刷卡片 */
+async function refreshNatScores() {
+  try {
+    const r = await api('/api/score/remote');
+    SCR.remote = r.items || {};
+    if (S.tab === 'nature' && NAT.side === 'album' && (NAT.photos || []).length) renderNatPhotos();
+  } catch {
+    /* 读不到就沿用内存里已有的 */
+  }
 }
 
 function natEmpty(title, sub) {
@@ -3613,7 +4302,7 @@ async function natStatus() {
       if (!NAT.album && NAT.side === 'album') {
         natEmpty(
           '选一个相册',
-          '右边是账号里的相册。点开就能看照片，勾上几张可以打包下载；在「标注」页勾好的图，点右上角那个按钮就能传上来。'
+          '右边是账号里的相册。点开就能看照片，勾上几张可以下载原图或导出 KML 轨迹；在「标注」页勾好的图，点右上角那个按钮就能传上来。'
         );
       }
     } else {
@@ -3691,27 +4380,14 @@ async function natLoadAlbums() {
   natRefreshSelects();
 }
 
-/** 两处下拉（自然在线的「移动到」、标注页的「移动到相册」）共用一份相册清单 */
-function natFillAlbumSelect(sel, withNew) {
-  if (!sel) return;
-  const cur = sel.value;
-  const head = withNew ? '自然在线相册…' : '移到哪个相册…';
-  const opts = [`<option value="">${head}</option>`];
-  for (const a of NAT.albums) {
-    opts.push(`<option value="${esc(a.id)}">${esc(a.title)}</option>`);
-  }
-  if (withNew) opts.push('<option value="__new__">＋ 新建相册…</option>');
-  sel.innerHTML = opts.join('');
-  if ([...sel.options].some((o) => o.value === cur)) sel.value = cur;
-  else sel.value = '';
+function natRefreshSelects() {
+  natSyncSel();
 }
 
-function natRefreshSelects() {
-  natFillAlbumSelect($('natMoveSel'), false);
-  natFillAlbumSelect($('tagNatSel'), true);
-  natFillAlbumSelect($('scNatSel'), false);
+/** 上传进行中同步各按钮状态（这几个调用点原本是「移动到相册」按钮留下的） */
+function natSyncTagBtn() {
+  if ($('tagBatchBtn')) $('tagBatchBtn').disabled = Boolean(NAT.upl) || !S.sel.size || S.mode !== 'album';
   natSyncSel();
-  natSyncTagBtn();
 }
 
 /** 标注页启动后静默拉一次相册：不阻塞界面，拉不到就等用户点开时再试 */
@@ -3728,14 +4404,6 @@ async function natEnsureAlbums() {
   } finally {
     natAlbumsLoading = false;
   }
-}
-
-function natSyncTagBtn() {
-  const btn = $('tagNatBtn');
-  if (!btn) return;
-  const v = $('tagNatSel').value;
-  btn.disabled = !S.sel.size || !v || v === '__new__' || Boolean(NAT.upl);
-  if (!NAT.upl) btn.textContent = '移动到相册';
 }
 
 function renderNatAlbums() {
@@ -3756,29 +4424,440 @@ function renderNatAlbums() {
     .join('');
 }
 
-/* ---------------- 自然在线：中间这块看「本机文件夹」还是「相册照片」 ---------------- */
+/* ---------------- 标注页的「相册端」 ----------------
+ * 为什么接进标注页而不是另开一页：要的是「像标注本地照片一样」处理相册照片 ——
+ * 同一套网格、同一套勾选、同一套右侧面板（各站明细 + 候选表），只是照片在自然在线
+ * 账号里，写回走站点接口而不是图片标签。
+ *
+ * 实现上不复制状态：相册照片当成「伪文件」塞进 S.files，path 用 nat:<photoId>，
+ * 这样 render()/updateCount()/openPanel() 这些已有逻辑不用大改，只在几个入口认出
+ * nat: 前缀换实现（卡片图、识别、面板脚注）。切回本机端时把快照还回去。
+ */
+
+const NAT_KEY = 'nat:';
+const isNatKey = (p) => typeof p === 'string' && p.startsWith(NAT_KEY);
+
+/** 相册照片 → 伪文件：字段和本机文件对齐，缺的留空，省得别处判空炸 */
+function natPhotoAsFile(p) {
+  return {
+    path: NAT_KEY + p.photoId,
+    name: p.fileName || p.name || p.photoId,
+    size: Number(p.size) || 0,
+    nat: p,
+  };
+}
+
+/** 相册端左栏：相册列表 */
+function renderAlbumRail() {
+  const box = $('albumRail');
+  if (!box) return;
+  if (!NAT.loggedIn) {
+    box.innerHTML =
+      '<div class="ar-empty"><b>相册没登录</b><br>相册要用你自己的自然在线账号。到「自然在线」页登录一次（验证码只能人眼看），回来这里就有相册了。<br>识别本身用的是程序内置账号，不登录也能认。</div>';
+    return;
+  }
+  if (!NAT.albums.length) {
+    box.innerHTML = '<div class="ar-empty"><b>还没有相册</b>到「自然在线」页新建一个，再把照片传上去。</div>';
+    return;
+  }
+  box.innerHTML = NAT.albums
+    .map(
+      (a) => `<div class="ar-item${NAT.album && NAT.album.id === a.id ? ' on' : ''}" data-id="${esc(a.id)}" data-title="${esc(a.title)}">
+        <span class="ttl" title="${esc(a.title)}">${esc(a.title)}</span>
+        <span class="cnt">${a.count || 0}</span>
+      </div>`,
+    )
+    .join('');
+}
+
+/** 进相册端：先拉相册清单；已经选过相册就把照片铺出来 */
+async function enterAlbumMode() {
+  if (!NAT.loggedIn) await natStatus();
+  await natEnsureAlbums();
+  renderAlbumRail();
+  if (NAT.album) await loadAlbumPhotos();
+  else {
+    S.files = [];
+    NAT.photos = [];
+    NAT.total = 0;
+    S.sel.clear();
+    S.active = null;
+    renderAlbum();
+  }
+}
+
+/** 打开某个相册：页码归 1、勾选清空 */
+async function openAlbumHere(id, title) {
+  NAT.album = { id, title };
+  NAT.page = 1;
+  S.page = 1;
+  S.sel.clear();
+  S.active = null;
+  renderAlbumRail();
+  await loadAlbumPhotos();
+}
+
+/** 拉当前相册的一页照片，转成伪文件铺到网格里 */
+async function loadAlbumPhotos() {
+  if (!NAT.album) return;
+  const size = NAT.size || 120;
+  const grid = $('grid');
+  grid.innerHTML = '<div class="arch-loading"><span class="spin"></span> 读取照片…</div>';
+  try {
+    const r = await api(`/api/nat/photos?album=${enc(NAT.album.id)}&page=${NAT.page}&size=${size}`);
+    NAT.photos = r.records || [];
+    NAT.total = r.total || NAT.photos.length;
+    if (r.album && r.album.title) NAT.album.title = r.album.title;
+  } catch (err) {
+    NAT.photos = [];
+    NAT.total = 0;
+    S.files = [];
+    renderAlbum();
+    $('empty').hidden = false;
+    $('empty').innerHTML = `<b>照片读不出来</b>${esc(err.message)}`;
+    return;
+  }
+  S.files = NAT.photos.map(natPhotoAsFile);
+  renderAlbum();
+  scAlbumSync();
+}
+
+/** 站点照片列表变了（换相册 / 翻页 / 同步完鉴定）时，评分页相册端跟着重铺 */
+function scAlbumSync() {
+  if (S.tab === 'score' && SCR.mode === 'album') scLoadAlbum();
+}
+
+/** 相册端的网格：和本机那套长得一样，图片走 /api/nat/img，卡片多一行识别结果 */
+function renderAlbum() {
+  const grid = $('grid');
+  S.els.clear();
+  grid.innerHTML = S.files.map(albumCardHtml).join('');
+  for (const el of grid.children) {
+    const p = el.dataset.p;
+    if (p) S.els.set(p, el);
+  }
+  bindGridEvents(grid, false);
+  renderAlbumPager();
+  $('empty').hidden = S.files.length > 0;
+  if (!S.files.length) {
+    $('empty').innerHTML = NAT.album
+      ? '<b>这个相册还是空的</b>到「自然在线」页把照片传上来，再回这里识别'
+      : '<b>先在左边选一个相册</b>照片都在自然在线账号里，选一个相册就会铺在这里';
+  }
+  updateCount();
+}
+
+function albumCardHtml(f) {
+  const on = S.sel.has(f.path);
+  const act = S.active === f.path;
+  const p = f.nat || {};
+  const orig = [p.cname, p.lname].filter(Boolean).join(' ');
+  const sub = orig || [p.date, p.place].filter(Boolean).join(' · ') || (f.size ? kb(f.size) : '站点未命名');
+  return `<div class="card${on ? ' sel' : ''}${act ? ' active' : ''}" data-p="${esc(f.path)}">
+        <div class="thumb" title="单击看大图；点左上角圆圈勾选">
+          <img loading="lazy" decoding="async" src="/api/nat/img?u=${enc(p.thumb || p.full || '')}" alt="">
+          <span class="tick" title="单击勾选">${on ? '✓' : ''}</span>
+        </div>
+        <div class="meta" title="单击勾选；双击手写中文名 / 拉丁名"><div class="nm" title="${esc(f.name)}">${esc(f.name)}</div><div class="sz">${esc(sub)}</div>${albumCardLine(f.path)}</div>
+      </div>`;
+}
+
+/** 卡片上的识别结果行（相册端） */
+function albumCardLine(key) {
+  if (S.busy.has(key)) return '<div class="idr run"><span class="spin"></span>识别中…</div>';
+  const rec = NAT.renames.get(String(key).slice(NAT_KEY.length));
+  if (rec && rec.status !== 'done') {
+    const nm = [rec.chinese, rec.latin].filter(Boolean).join(' ') || '（未命名）';
+    return `<div class="idr pending" title="已写入本机，等「重新鉴定上传」同步到自然在线">待上传 ${esc(nm)}</div>`;
+  }
+  const r = S.results.get(key);
+  if (!r) return '';
+  if (r.error) return `<div class="idr bad" title="${esc(r.error)}">识别失败</div>`;
+  const rows = r.rows || [];
+  if (!rows.length) return '<div class="idr bad">没认出来</div>';
+  const top = rows[0];
+  const sup = Number(top.support) || 1;
+  const tail = sup > 1 ? ` · ${sup} 站` : top.pct != null ? ` ${Math.round(top.pct)}%` : '';
+  return `<div class="idr new">识别 ${esc(top.cn || top.latin || '')}${tail}</div>`;
+}
+
+function renderAlbumPager() {
+  const bar = $('pager');
+  if (!bar) return;
+  const size = NAT.size || 120;
+  const pages = Math.max(1, Math.ceil(NAT.total / size));
+  bar.hidden = NAT.total <= size;
+  if (bar.hidden) return;
+  $('pgNow').textContent = String(NAT.page);
+  $('pgTotal').textContent = String(pages);
+  $('pgPrev').disabled = NAT.page <= 1;
+  $('pgNext').disabled = NAT.page >= pages;
+  const from = (NAT.page - 1) * size + 1;
+  const to = Math.min(NAT.total, NAT.page * size);
+  $('pgStat').textContent = `${from}–${to} 张 / 共 ${NAT.total} 张` + (S.sel.size ? ` · 已选 ${S.sel.size}` : '');
+}
+
+function toggleAlbum(p, jump = true) {
+  if (S.sel.has(p)) S.sel.delete(p);
+  else S.sel.add(p);
+  S.active = p;
+  patchAlbumCard(p);
+  updateCount();
+  if (jump) openPanel(p);
+}
+
+/** 只改一张卡片：勾选态、识别结果行 */
+function patchAlbumCard(p) {
+  const el = S.els.get(p);
+  if (!el) return;
+  const on = S.sel.has(p);
+  el.classList.toggle('sel', on);
+  el.classList.toggle('active', S.active === p);
+  const tick = el.querySelector('.tick');
+  if (tick) tick.textContent = on ? '✓' : '';
+  const meta = el.querySelector('.meta');
+  if (!meta) return;
+  const old = meta.querySelector('.idr');
+  const html = albumCardLine(p);
+  if (!html) {
+    if (old) old.remove();
+    return;
+  }
+  if (old) old.outerHTML = html;
+  else meta.insertAdjacentHTML('beforeend', html);
+}
+
+/** 相册端的右侧面板：图片、各站明细、候选表、写回按钮 */
+function openAlbumPanel(p) {
+  const f = S.files.find((x) => x.path === p) || { path: p, name: p.slice(NAT_KEY.length), nat: {} };
+  const ph = f.nat || {};
+  S.albumPick = null;
+  $('panel').classList.add('nat-mode');
+  $('panelEmpty').hidden = true;
+  $('panelBody').hidden = false;
+  $('pvImg').src = `/api/nat/img?u=${enc(ph.thumb || ph.full || '')}`;
+  $('pvName').textContent = f.name;
+  $('pvLabel').textContent = '来自自然在线相册 · 写回只改鉴定结果';
+  $('pvExif').textContent = [[ph.cname, ph.lname].filter(Boolean).join(' '), ph.date, ph.place]
+    .filter(Boolean)
+    .join(' · ');
+  $('writeMsg').textContent = '';
+  $('natWriteMsg').textContent = '';
+  const r = S.results.get(p);
+  // 各站明细和标注页那张图是同一份数据、同一套画法，直接复用
+  pvSitesPaint(r);
+  renderAlbumCands(r);
+  syncAlbumWrite();
+}
+
+/** 候选表（相册端）：点一条就是选中它，作为「写入鉴定」的内容 */
+function renderAlbumCands(r) {
+  const list = $('candList');
+  if (!list) return;
+  if (!r) {
+    list.innerHTML = '<div class="dim" style="padding:6px 2px">还没识别。勾上这张，点右上「识别选中」。</div>';
+    $('pvVerdict').textContent = '';
+    return;
+  }
+  if (r.error) {
+    list.innerHTML = `<div class="msg err">${esc(r.error)}</div>`;
+    $('pvVerdict').textContent = '';
+    return;
+  }
+  const rows = r.rows || [];
+  if (!rows.length) {
+    const failed = Object.entries(r.sites || {})
+      .filter(([, v]) => !v.ok)
+      .map(([k, v]) => `${SITE_NAME()[k] || k}：${v.error}`);
+    list.innerHTML = `<div class="dim" style="padding:6px 2px">没有站点给出结果</div>${
+      failed.length
+        ? `<ul class="dim" style="padding-left:16px;font-size:11.5px">${failed.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>`
+        : ''
+    }`;
+    $('pvVerdict').textContent = '';
+    return;
+  }
+  const names = SITE_NAME();
+  const cacheNote = r.cached
+    ? '<div class="dim" style="padding:2px 2px 6px;font-size:11.5px">本机缓存 · <a href="#" data-reid="1" style="color:inherit;text-decoration:underline">重新识别</a></div>'
+    : '';
+  list.innerHTML = cacheNote + rows
+    .slice(0, 10)
+    .map((row, i) => {
+      const srcs = Object.keys(row.bySite || {}).map((k) => names[k] || k).join('、');
+      return `<button class="cand${i === 0 ? ' on' : ''}" data-i="${i}" title="认出它的站：${esc(srcs)}">
+        <span class="pct">${row.pct}%</span>
+        <span class="nm"><div class="cn">${esc(row.cn || '（无中文名）')}</div><div class="la">${esc(row.latin || '')}</div></span>
+        <span class="src">${row.support} 票</span>
+      </button>`;
+    })
+    .join('');
+  list.onclick = (e) => {
+    const reid = e.target.closest('[data-reid]');
+    if (reid) {
+      e.preventDefault();
+      identifyAlbumOne(S.active, { force: true });
+      return;
+    }
+    const b = e.target.closest('.cand');
+    if (!b) return;
+    [...list.children].forEach((x) => x.classList.toggle('on', x === b));
+    S.albumPick = rows[Number(b.dataset.i)] || null;
+    syncAlbumWrite();
+  };
+  S.albumPick = rows[0];
+  $('pvVerdict').textContent = r.verdict || '';
+  prefetchTaxo(rows);
+  syncAlbumWrite();
+}
+
+/** 候选选中状态同步到「写入鉴定」按钮 */
+function syncAlbumWrite() {
+  const btn = $('natWriteOne');
+  if (!btn) return;
+  const row = S.albumPick;
+  btn.disabled = !row || !isNatKey(S.active);
+  btn.textContent = row ? `写入「${row.cn || row.latin || '这个候选'}」` : '写入鉴定';
+}
+
+/** 相册端的「写入鉴定」：把选中的候选先存到本机待上传记录，不立即联网提交。
+ *  之后由「重新鉴定上传」把纯名字同步到平台（图片不上传），再回读站点的新鉴定结果。 */
+async function natWriteOne() {
+  if (!isNatKey(S.active) || !S.albumPick) return toast('先在上面选一个候选');
+  const row = S.albumPick;
+  const photoId = S.active.slice(NAT_KEY.length);
+  const ph = (S.files.find((x) => x.path === S.active) || {}).nat || {};
+  const rec = {
+    photoId,
+    albumId: NAT.album ? String(NAT.album.id) : String(ph.albumId || ''),
+    fileName: ph.fileName || ph.name || '',
+    chinese: String(row.cn || '').trim(),
+    latin: String(row.latin || '').trim(),
+    nameId: '',
+    original: { cname: ph.cname || '', lname: ph.lname || '' },
+    status: 'pending',
+    message: '',
+    savedAt: Date.now(),
+  };
+  if (!rec.chinese && !rec.latin) return toast('这个候选没有名字，换一个候选');
+  const btn = $('natWriteOne');
+  if (btn) btn.disabled = true;
+  $('natWriteMsg').textContent = '';
+  try {
+    const out = await post('/api/nat/renames', { records: [rec] });
+    NAT.renames = new Map(
+      (out.records || []).filter((x) => x && x.photoId).map((x) => [String(x.photoId), x]),
+    );
+    refreshPendingBadge();
+    patchAlbumCard(S.active);
+    const name = [rec.chinese, rec.latin].filter(Boolean).join(' ');
+    $('natWriteMsg').innerHTML =
+      `已写入「${esc(name)}」，<b>还没上传</b>。点旁边「重新鉴定上传」把鉴定结果同步到自然在线（图片不上传）。`;
+  } catch (err) {
+    $('natWriteMsg').textContent = '写入失败：' + err.message;
+  } finally {
+    if (btn) btn.disabled = false;
+    syncAlbumWrite();
+  }
+}
+
+/** 本机端 ⇄ 相册端：只换「照片从哪来」，网格和右侧面板是同一套 */
+async function setSource(mode, opts = {}) {
+  const m = mode === 'album' ? 'album' : 'local';
+  if (m === 'album' && (S.tab === 'stats' || S.tab === 'archive' || S.tab === 'nature')) {
+    toast(
+      S.tab === 'nature'
+        ? '自然在线页右边就是相册列表，直接点右边的相册看照片；左栏留给本机文件夹'
+        : '统计分析 / 按分类归档只处理本机文件夹，相册端在这里不可用',
+      3200,
+    );
+    return;
+  }
+  if (S.mode === m) return;
+  // 进相册端前把本机这份收好（S.files 要被相册占用），切回来原样还回去
+  if (m === 'album') S.localSnap = { files: S.files, dir: S.dir, dirs: S.dirs, page: S.page };
+  S.mode = m;
+  S.sel.clear();
+  S.active = null;
+  S.queue = 0;
+  S.albumPick = null;
+  const alb = m === 'album';
+  if ($('srcSeg')) [...$('srcSeg').children].forEach((b) => b.classList.toggle('on', b.dataset.src === m));
+  $('panel').classList.toggle('nat-mode', alb);
+  $('panelEmpty').hidden = false;
+  $('panelBody').hidden = true;
+  $('railHeadFiles').hidden = alb;
+  $('railHeadAlbums').hidden = !alb;
+  $('albumRail').hidden = !alb;
+  const pathbox = $('pathInput') && $('pathInput').closest('.pathbox');
+  if (pathbox) pathbox.hidden = alb;
+  if ($('places')) $('places').hidden = alb;
+  if ($('tree')) $('tree').hidden = alb;
+  // 相册端没有「筛选未标注」「导出清单」；「照片评分」两个来源都能用，保留
+  if ($('filterSeg')) $('filterSeg').hidden = alb;
+  if ($('exportBtn')) $('exportBtn').hidden = alb;
+  if ($('toScoreBtn')) $('toScoreBtn').hidden = false;
+  if ($('selAll')) $('selAll').textContent = alb ? '全选本页' : S.filter === 'nolatin' ? '全选没有学名' : '全选未标注';
+  // 批量鉴定只在相册端出现（本机端没有「写回站点鉴定」这回事）
+  if ($('tagBatchBtn')) $('tagBatchBtn').hidden = !alb;
+  if (alb) {
+    await enterAlbumMode();
+  } else {
+    const snap = S.localSnap || {};
+    S.files = snap.files || [];
+    S.dir = snap.dir || S.dir;
+    S.dirs = snap.dirs || [];
+    S.page = snap.page || 1;
+    if ($('pager')) $('pager').hidden = true;
+    // 目录树还没读出来（刚启动、磁盘慢）时不挡着切回来，下一次读盘会自己补上
+    try {
+      renderTree();
+    } catch {
+      /* 树没准备好就先空着 */
+    }
+    render();
+  }
+  // 自然在线页、评分页都没有自己的来源开关，一律跟随这里
+  NAT.side = alb ? 'album' : 'local';
+  syncNatSideUI(S.tab === 'nature');
+  if (S.tab === 'score') scoreOpen();
+  updateCount();
+  if (!opts.quiet) toast(alb ? '已切到相册端：照片来自自然在线账号' : '已切回本机端', 2000);
+}
+
+/* ---------------- 自然在线：中间这块看什么，由左栏的「本机端 / 相册端」决定 ---------------- */
 
 /** 当前本地文件夹里能看的图片（和标注页同一份 S.files，不额外读盘） */
 function natLocalList() {
   return (S.files || []).filter((f) => /\.(jpe?g|png|webp|bmp|tiff?)$/i.test(String(f.name || '')));
 }
 
-function natSideSet(side) {
-  NAT.side = side === 'album' ? 'album' : 'local';
-  const box = $('natSide');
-  if (box) [...box.children].forEach((b) => b.classList.toggle('on', b.dataset.side === NAT.side));
-  if ($('natLocalActs')) $('natLocalActs').hidden = NAT.side !== 'local';
-  if ($('natAlbumActs')) $('natAlbumActs').hidden = NAT.side !== 'album';
-  NAT.sel.clear();
-  NAT.localSel.clear();
-  if (NAT.side === 'album') {
+/**
+ * 同步自然在线页中间那块的按钮 + 网格。
+ * 来源不再由页面内的开关决定，而是读左栏的 S.mode（setSource 会同步 NAT.side）。
+ * reload=false 只刷按钮，用在「人不在自然在线页」的时候，避免白白联网拉照片。
+ */
+function syncNatSideUI(reload) {
+  const albumMode = NAT.side === 'album';
+  if ($('natLocalActs')) $('natLocalActs').hidden = albumMode;
+  if ($('natAlbumActs')) $('natAlbumActs').hidden = !albumMode;
+  // 本机端：提示可以直接拖；相册端：提示怎么回文件夹（左栏锁的是本机端）
+  if ($('natDragHint')) {
+    $('natDragHint').hidden = false;
+    $('natDragHint').textContent = albumMode
+      ? '点左栏「本机端」回到本机文件夹'
+      : '拖照片 / 子文件夹到右边相册即可上传';
+  }
+  if (!reload) { natSyncSel(); return; }
+  if (albumMode) {
     if (NAT.album) natLoadPhotos();
     else {
       $('natGrid').innerHTML = '';
       $('natPager').hidden = true;
       NAT.visibleTotal = 0;
+      NAT.photos = [];
       $('natAlbumName').textContent = '选右边的相册看照片';
-      natEmpty('选一个相册', '右边是账号里的相册，点开就能看照片；勾上几张可以打包下载、识别或移到别的相册。');
+      natEmpty('选一个相册', '右边是账号里的相册，点开就能看照片；勾上几张可以下载原图或导出 KML 轨迹。');
     }
   } else {
     renderNatLocal();
@@ -3786,32 +4865,60 @@ function natSideSet(side) {
   natSyncSel();
 }
 
-/** 本地模式：把当前文件夹的图片铺成和站点相册一样的卡片，点一下勾选 */
+/**
+ * 本机端的子文件夹卡片：单击进去，拖到右边某个相册 = 把整个文件夹传上去。
+ * 样式沿用标注页的 .card.folder，只多一个可拖标记。
+ */
+function natFolderCardHtml(d) {
+  return `<div class="card folder nat-folder" draggable="true" data-d="${esc(d.path)}" title="单击进入「${esc(d.name)}」；拖到右边相册即可上传这个文件夹">
+    <div class="thumb fold">
+      <svg viewBox="0 0 48 48" width="46" height="46" aria-hidden="true">
+        <path d="M6 14a3 3 0 0 1 3-3h9l4 4.5h17a3 3 0 0 1 3 3v3H6z" fill="#dcae5d"/>
+        <path d="M6 19h36l-4 16.5a3 3 0 0 1-3 2.5H12a3 3 0 0 1-3-2.6z" fill="#f0c877"/>
+      </svg>
+      <span class="nat-drag-mark" title="拖到右边相册上传">⇢</span>
+    </div>
+    <div class="meta"><div class="nm" title="${esc(d.path)}">${esc(d.name)}</div><div class="sz">文件夹 · 可拖到右边相册</div></div>
+  </div>`;
+}
+
+/** 本地模式：子文件夹 + 图片一起铺成卡片；照片可勾选，也可拖到右边相册上传 */
 function renderNatLocal() {
   const grid = $('natGrid');
   if (!grid) return;
   $('natPager').hidden = true;
   const files = natLocalList();
+  const dirs = S.dirs || [];
   NAT.visibleTotal = files.length;
+  // 换了文件夹后，勾选里那些已经不在本目录的路径要清掉，免得「上传这些 N 张」数字虚高
+  const valid = new Set(files.map((f) => f.path));
+  for (const p of [...NAT.localSel]) if (!valid.has(p)) NAT.localSel.delete(p);
   $('natAlbumName').textContent = S.dir ? shortenPath(S.dir) : '先在左边选一个文件夹';
   $('natAlbumName').title = S.dir || '';
   grid.innerHTML = '';
-  if (!files.length) {
+  if (!files.length && !dirs.length) {
     natEmpty(
       '这个文件夹没有图片',
-      S.dir ? '换一个文件夹，或者切到「相册照片」看站点上的照片。' : '在左边的文件树里点一个装有照片的文件夹。',
+      S.dir ? '换一个文件夹；右边是账号里的相册，点开就能看站点照片。' : '在左边的文件树里点一个装有照片的文件夹。',
     );
     natSyncSel();
     return;
   }
   $('natEmpty').hidden = true;
   const frag = document.createDocumentFragment();
+  // 子文件夹排在照片前面：和标注页一致，也方便一眼把整个文件夹拖到右边相册
+  for (const d of dirs) {
+    const wrap = document.createElement('div');
+    wrap.innerHTML = natFolderCardHtml(d);
+    frag.appendChild(wrap.firstElementChild);
+  }
   for (const f of files) {
     const on = NAT.localSel.has(f.path);
     const card = document.createElement('div');
     card.className = `card${on ? ' sel' : ''}`;
     card.dataset.p = f.path;
-    card.title = f.name;
+    card.draggable = true;
+    card.title = `${f.name}｜单击勾选；拖到右边相册上传`;
     card.innerHTML = `
       <div class="thumb">
         <img loading="lazy" decoding="async" draggable="false" src="/img?path=${enc(f.path)}&amp;thumb=1" alt="">
@@ -3841,15 +4948,9 @@ async function natOpenAlbum(id, title) {
   NAT.sel.clear();
   renderNatAlbums();
   $('natAlbumName').textContent = title;
-  // 点相册就是要看相册：自动把中间这块切到「相册照片」
-  if (NAT.side !== 'album') {
-    NAT.side = 'album';
-    const box = $('natSide');
-    if (box) [...box.children].forEach((b) => b.classList.toggle('on', b.dataset.side === 'album'));
-    if ($('natLocalActs')) $('natLocalActs').hidden = true;
-    if ($('natAlbumActs')) $('natAlbumActs').hidden = false;
-    NAT.localSel.clear();
-  }
+  // 相册列就在右边，左栏保持本机端不动；中间这块单独切到站点照片
+  NAT.side = 'album';
+  syncNatSideUI(false);
   await natLoadPhotos();
   natSyncUpBtn();
   natSyncSel();
@@ -3901,11 +5002,12 @@ function renderNatPhotos() {
       <div class="thumb">
         <img loading="lazy" decoding="async" src="/api/nat/img?u=${enc(src)}" alt="">
         <span class="tick">${on ? '✓' : ''}</span>
+        ${natScoreBadge(p)}
       </div>
       <div class="meta">
         <div class="nm" title="${esc(label)}">${esc(label)}</div>
         <div class="sz">${esc(sub || (p.size > 0 ? kb(p.size) : ''))}</div>
-        ${natIdLine(p)}
+        ${natPendingLine(p)}
         ${natScoreLine(p)}
       </div>`;
     frag.appendChild(card);
@@ -3913,6 +5015,7 @@ function renderNatPhotos() {
   grid.appendChild(frag);
   renderNatPager();
   natSyncSel();
+  scAlbumSync();
 }
 
 function renderNatPager() {
@@ -3938,22 +5041,12 @@ function natSyncSel() {
       : '先在右边选一个目标相册（或把「上传到」改成「按物种名分相册」）';
   }
   $('natSelInfo').textContent = n ? `已选 ${n} 张` : '';
-  $('natDlBtn').disabled = !n || localMode;
-  $('natDelBtn').disabled = !n || localMode;
-  const idb = $('natIdBtn');
-  if (idb) {
-    idb.disabled = !n || NAT.idRunning || localMode;
-    idb.textContent = NAT.idRunning ? '识别中…' : `识别选中的 ${n} 张`;
-  }
-  const mb = $('natMoveBtn');
-  if (mb) {
-    mb.disabled = !n || !NAT.loggedIn || !$('natMoveSel').value || Boolean(NAT.upl) || localMode;
-    mb.textContent = '移动到';
-  }
-  const sb = $('natScoreBtn');
-  if (sb) sb.disabled = !n || SCR.running || localMode;
-  const wb = $('natWriteBtn');
-  if (wb) wb.disabled = !n || NAT.idRunning || localMode;
+  const reid = $('natReIdBtn');
+  if (reid) reid.disabled = false; // 读本机待上传记录，不依赖当前勾选
+  // 下载类只在相册端可用；没勾选就按本页全部处理，所以只要本页有照片就能点
+  const hasPhotos = !localMode && (NAT.photos || []).length > 0;
+  if ($('natOrigBtn')) $('natOrigBtn').disabled = !hasPhotos;
+  if ($('natKmlBtn')) $('natKmlBtn').disabled = !hasPhotos;
   // 全选 / 清空：没有可选的就灰掉；全选只作用于当前显示的这一屏
   if ($('natSelAll')) $('natSelAll').disabled = !NAT.visibleTotal || n >= NAT.visibleTotal;
   if ($('natSelNone')) $('natSelNone').disabled = n === 0;
@@ -4027,6 +5120,8 @@ function bindNatMarquee() {
     if (e.button !== 0 || e.pointerType === 'touch') return;
     if (NAT.idRunning || NAT.upl) return; // 识别/上传进行中别画框
     const startCard = e.target.closest ? e.target.closest('.card') : null;
+    // 卡片本身可拖到右边相册：别让框选抢走这个手势；框选仍可在空白处起笔
+    if (startCard && startCard.getAttribute('draggable') === 'true') return;
     scClearTextSelection();
     const additive = e.shiftKey || e.ctrlKey || e.metaKey;
     const localMode = NAT.side === 'local';
@@ -4079,55 +5174,6 @@ function bindNatMarquee() {
   });
 }
 
-/* ---------------- 自然在线：调识别内核 ----------------
- * 图和本地照片不一样，不在本机：先用 /api/nat/img 把原图取到浏览器里，
- * 压出 1600 / 640 两个副本（和「标注」页同一套），再把地址交给服务端取原图跑识别。
- */
-function natIdLine(p) {
-  if (NAT.busy.has(p.photoId)) return '<div class="idr run"><span class="spin"></span>识别中…</div>';
-  const r = NAT.res.get(p.photoId);
-  if (!r) return '';
-  if (r.error) return `<div class="idr bad" title="${esc(r.error)}">识别失败</div>`;
-  const rows = r.rows || [];
-  if (!rows.length) return '<div class="idr bad">没认出来</div>';
-  const top = rows[0];
-  // 卡片上只写中文名：标题那行已经有「中文 + 拉丁」了，这里再来一遍会挤爆
-  const nm = top.cn || top.latin || '';
-  // 多个站一起问时，聚合分会把「只有一两个站认出来」的答案拉低，看着像没信心 ——
-  // 所以多站就显示「几个站认了」，只有单站才显示百分比。
-  const sup = Number(top.support) || 1;
-  const tail = sup > 1 ? ` · ${sup} 站` : top.pct != null ? ` ${Math.round(top.pct)}%` : '';
-  // 站点原来有名字、且和识别结果一致 —— 说明这张本来就认对了，标绿
-  const same = p.cname && top.cn && String(p.cname).trim() === String(top.cn).trim();
-  const tip = [
-    top.bySite ? `认出它的站：${top.bySite}` : '',
-    ...rows
-      .slice(0, 5)
-      .map((x) => [x.cn, x.latin].filter(Boolean).join(' ') + (x.pct != null ? ` ${Math.round(x.pct)}%` : '')),
-  ]
-    .filter(Boolean)
-    .join('\n');
-  return `<div class="idr ${same ? 'ok' : 'new'}" title="${esc(tip)}">识别 ${esc(nm)}${tail}</div>`;
-}
-
-function patchNatCard(id) {
-  const card = document.querySelector(`#natGrid .card[data-id="${id}"]`);
-  if (!card) return;
-  const p = NAT.photos.find((x) => x.photoId === id);
-  if (!p) return;
-  const html = natIdLine(p);
-  const old = card.querySelector('.idr');
-  if (!html) {
-    if (old) old.remove();
-    return;
-  }
-  if (old) old.outerHTML = html;
-  else {
-    const meta = card.querySelector('.meta');
-    if (meta) meta.insertAdjacentHTML('beforeend', html);
-  }
-}
-
 /** 站点上的图做识别用：只压多识要的那份 ≤640 小图 */
 function natVariants(p) {
   // 原图本身就是 JPEG 时不要再压一份 1600 的覆盖它 —— 站点拿原图打分更准
@@ -4149,51 +5195,6 @@ function natVariants(p) {
   });
 }
 
-async function natIdentify() {
-  if (NAT.idRunning) return;
-  const targets = [...NAT.sel].map((id) => NAT.photos.find((p) => p.photoId === id)).filter(Boolean);
-  if (!targets.length) return toast('先勾几张照片');
-
-  NAT.idRunning = true;
-  for (const p of targets) {
-    NAT.res.delete(p.photoId);
-    NAT.busy.add(p.photoId);
-    patchNatCard(p.photoId);
-  }
-  natSyncSel();
-
-  let done = 0;
-  let hit = 0;
-  const queue = targets.slice();
-  const worker = async () => {
-    while (queue.length) {
-      const p = queue.shift();
-      try {
-        const variants = await natVariants(p);
-        const r = await post('/api/nat/identify', {
-          url: p.full || p.thumb,
-          name: p.fileName || '',
-          sources: S.state.current.sources,
-          ...variants,
-        });
-        NAT.res.set(p.photoId, r);
-        if ((r.rows || []).length) hit += 1;
-      } catch (err) {
-        NAT.res.set(p.photoId, { rows: [], error: err.message });
-      } finally {
-        NAT.busy.delete(p.photoId);
-        patchNatCard(p.photoId);
-        done += 1;
-      }
-    }
-  };
-  await Promise.all([worker(), worker()]);
-
-  NAT.idRunning = false;
-  natSyncSel();
-  toast(`识别完成 ${done} 张，${hit} 张有结果`, 2600);
-}
-
 /* ---------------- 自然在线：写回鉴定（只改鉴定结果，不动原图） ----------------
  * 和原独立版 nature-client 的「重新鉴定上传 / 批量鉴定」是同一条链路：
  *   GET  /api/nat/taxa        把名字解析成站点分类库的 NameID
@@ -4201,7 +5202,7 @@ async function natIdentify() {
  * 站点收到后覆盖这几张照片的鉴定结果；图片文件完全不参与，也不会新增照片。
  * 千万别和「上传」混了：上传走 /api/nat/upload，会往相册里多出一张图。
  */
-const NW = { rows: [], taxa: [], nameId: '', submitting: false };
+const NW = { rows: [], taxa: [], nameId: '', submitting: false, mode: 'write' };
 
 /** 在分类库候选里挑最贴近的：学名精确 > 中文精确 > 学名前缀 > 首个（照原版口径） */
 function nwPickTaxon(taxa, chinese, latin) {
@@ -4228,29 +5229,60 @@ function nwCollect() {
   }
 }
 
-function nwOpen() {
-  if (NAT.side !== 'album') return toast('先切到「相册照片」再写回鉴定');
-  const ids = [...NAT.sel];
-  if (!ids.length) return toast('先勾选要写回的照片');
-  NW.rows = ids.map((id) => {
-    const p = NAT.photos.find((x) => x.photoId === id) || { photoId: id };
-    const r = NAT.res.get(id);
-    const top = (r && (r.rows || [])[0]) || null;
-    return {
-      photoId: id,
-      fileName: p.fileName || p.name || '',
-      original: [p.cname, p.lname].filter(Boolean).join(' ') || '（站点未命名）',
-      chinese: top ? String(top.cn || '') : String(p.cname || ''),
-      latin: top ? String(top.latin || '') : String(p.lname || ''),
+/**
+ * 打开鉴定提交面板。三个入口共用这一套，最后都走 /api/nat/reidentify（纯 JSON，不传图片）：
+ *   nwOpenReId()  → mode='reid'  「重新鉴定上传」：本机待上传记录，逐张各自名字
+ *   nwOpenBatch() → mode='batch' 「批量鉴定」：勾选的多张照片统一赋一个名字
+ *   nwOpen()      → mode='write' 兼容旧的直接写回入口
+ */
+function nwOpen(opts) {
+  const o = opts || {};
+  NW.mode = o.mode || 'write';
+  let ids = Array.isArray(o.ids) ? o.ids.slice() : [];
+  const hasRecords = Array.isArray(o.records);
+  if (!ids.length && !hasRecords) ids = nwPickedIds();
+  if (!ids.length && !hasRecords) {
+    return toast(NW.mode === 'batch' ? '先勾选要批量鉴定的照片' : '先勾选要写回的照片');
+  }
+  if (hasRecords) {
+    NW.rows = o.records.map((rec) => ({
+      photoId: String(rec.photoId),
+      fileName: String(rec.fileName || ''),
+      original: [rec.original && rec.original.cname, rec.original && rec.original.lname]
+        .filter(Boolean)
+        .join(' ') || '（站点未命名）',
+      chinese: String(rec.chinese || ''),
+      latin: String(rec.latin || ''),
       checked: true,
       status: '',
-      message: '',
-    };
-  });
+      message: rec.status === 'failed' ? `上次失败：${rec.message || ''}` : '',
+      removable: NW.mode === 'reid',
+      nameId: String(rec.nameId || ''),
+    }));
+  } else {
+    const single = ids.length === 1 && (o.zh || o.la) ? o : null;
+    NW.rows = ids.map((id) => {
+      const p = NAT.photos.find((x) => x.photoId === id) || { photoId: id };
+      const r = NAT.res.get(id) || S.results.get(NAT_KEY + id);
+      const top = (r && (r.rows || [])[0]) || null;
+      return {
+        photoId: id,
+        fileName: p.fileName || p.name || '',
+        original: [p.cname, p.lname].filter(Boolean).join(' ') || '（站点未命名）',
+        chinese: single ? String(single.zh || '') : top ? String(top.cn || '') : String(p.cname || ''),
+        latin: single ? String(single.la || '') : top ? String(top.latin || '') : String(p.lname || ''),
+        checked: true,
+        status: '',
+        message: '',
+        removable: false,
+        nameId: '',
+      };
+    });
+  }
   NW.taxa = [];
   NW.nameId = '';
   NW.submitting = false;
-  $('nwBatch').checked = false;
+  $('nwBatch').checked = !!o.batch;
   $('nwChinese').value = '';
   $('nwLatin').value = '';
   $('nwKw').value = '';
@@ -4258,9 +5290,60 @@ function nwOpen() {
   $('nwClearLock').hidden = true;
   $('nwLocked').hidden = true;
   $('nwTaxaList').innerHTML = '<div class="empty">输入中文名或学名后点「检索」；留空则提交时按每张的名字自动匹配。</div>';
+  const title = { reid: '重新鉴定上传', batch: '批量鉴定', write: '写回鉴定到自然在线' }[NW.mode]
+    || '写回鉴定到自然在线';
+  $('nwTitle').textContent = title;
+  $('nwTip').innerHTML = NW.mode === 'reid'
+    ? '下面是<b>本机已经写好、还没上传</b>的鉴定结果。提交时只发照片 id 与名字（纯 JSON），<b>图片不上传、不新增照片</b>；成功后重新读取自然在线，把站点返回的新鉴定结果显示回来。'
+    : NW.mode === 'batch'
+      ? '对勾选的多张照片<b>统一赋同一个名字</b>，一次提交鉴定。只发照片 id 与名字，<b>图片不上传</b>；成功后重新读取站点返回的新鉴定结果。'
+      : '把下面的名字作为「重新鉴定」提交到网页端，站点会覆盖这些照片的鉴定结果。<b>不上传图片、不新增照片、不删除原图</b>。';
+  $('nwSubmit').textContent = NW.mode === 'reid'
+    ? '上传鉴定结果'
+    : NW.mode === 'batch' ? '提交批量鉴定' : '提交写回';
   $('natWriteMask').classList.add('show');
   nwSyncBatch();
   nwRender();
+}
+
+/** 自然在线页「重新鉴定上传」：把本机待上传的记录列出来，默认全部勾选 */
+async function nwOpenReId() {
+  await natRenamesLoad();
+  const pending = natPendingList();
+  if (!pending.length) {
+    return toast('没有待上传的鉴定。先在「标注」页相册端选候选点「写入鉴定」，或用「批量鉴定」统一赋名。', 3800);
+  }
+  nwOpen({ mode: 'reid', records: pending });
+}
+
+/** 当前勾选的站点照片 id：标注页相册端优先，其次自然在线页里勾的照片 */
+function nwPickedIds() {
+  const tagPicked = [...S.sel].filter(isNatKey).map((k) => k.slice(NAT_KEY.length));
+  return tagPicked.length ? tagPicked : [...NAT.sel];
+}
+
+/** 「标注」页相册端的「批量鉴定」：对勾选的照片统一赋一个名字，一次提交（只传名字） */
+function nwOpenBatch() {
+  const ids = nwPickedIds();
+  if (!ids.length) return toast('先在相册里勾选要批量鉴定的照片', 3000);
+  nwOpen({ mode: 'batch', ids, batch: true });
+}
+
+/** 从本机待上传记录里移除一条（写错了、或不想传了） */
+async function nwRemoveRecord(photoId) {
+  try {
+    const out = await post('/api/nat/renames/delete', { ids: [photoId] });
+    NAT.renames = new Map(
+      (out.records || []).filter((x) => x && x.photoId).map((x) => [String(x.photoId), x]),
+    );
+    refreshPendingBadge();
+    NW.rows = NW.rows.filter((r) => r.photoId !== photoId);
+    nwRender();
+    if (S.mode === 'album') renderAlbum();
+    toast('已从待上传记录里移除');
+  } catch (err) {
+    toast('移除失败：' + err.message, 3000);
+  }
 }
 
 function nwClose() {
@@ -4286,6 +5369,7 @@ function nwRender() {
     .map(
       (r) => `<div class="nw-row${r.checked ? ' sel' : ''}" data-id="${esc(r.photoId)}">
       <input type="checkbox" class="nw-chk-row" data-id="${esc(r.photoId)}" ${r.checked ? 'checked' : ''}>
+      ${r.removable ? `<button class="nw-row-del" data-del="${esc(r.photoId)}" title="从本机待上传记录里移除">×</button>` : ''}
       <div class="nw-row-main">
         <div class="nw-row-name" title="${esc(r.fileName || r.photoId)}">${esc(r.fileName || r.photoId)}</div>
         <div class="nw-row-orig">站点原名：${esc(r.original)}</div>
@@ -4379,7 +5463,10 @@ async function nwSubmit() {
     $('nwErr').textContent = `「${empty.fileName || empty.photoId}」还没填名字`;
     return;
   }
-  if (!window.confirm(`把 ${rows.length} 张照片的鉴定结果写回自然在线？\n只改鉴定结果，不会上传或替换图片。`)) return;
+  const act = NW.mode === 'reid'
+    ? '上传本机写好的鉴定结果'
+    : NW.mode === 'batch' ? '提交批量鉴定' : '写回鉴定结果';
+  if (!window.confirm(`确认${act}（${rows.length} 张照片）？\n只发鉴定结果（照片 id + 名字），不上传图片、不新增照片。`)) return;
 
   NW.submitting = true;
   $('nwSubmit').disabled = true;
@@ -4417,6 +5504,7 @@ async function nwSubmit() {
       }
       nameId = got;
     }
+    r.nameId = String(nameId || '');
     records.push({ photoId: r.photoId, chinese: r.chinese, latin: r.latin, nameId });
   }
   if (records.length) {
@@ -4446,19 +5534,56 @@ async function nwSubmit() {
   renderNatPhotos();
   const okN = rows.filter((r) => r.status === 'ok').length;
   const failN = rows.length - okN;
-  toast(failN ? `已写回 ${okN} 张，失败 ${failN} 张` : `已写回 ${okN} 张到自然在线`, 3000);
+  // 把提交结果回写本机待上传记录：成功标记 done，失败留 failed 下次可重试
+  if (records.length) {
+    const recs = NW.rows.map((r) => ({
+      photoId: r.photoId,
+      fileName: r.fileName,
+      chinese: r.chinese,
+      latin: r.latin,
+      nameId: r.nameId || NW.nameId || '',
+      status: r.status === 'ok' ? 'done' : r.status === 'bad' ? 'failed' : 'pending',
+      message: r.message || '',
+      savedAt: Date.now(),
+    }));
+    try {
+      const out = await post('/api/nat/renames', { records: recs });
+      NAT.renames = new Map(
+        (out.records || []).filter((x) => x && x.photoId).map((x) => [String(x.photoId), x]),
+      );
+      refreshPendingBadge();
+    } catch {
+      /* 本机落盘失败不影响已经提交成功的结果 */
+    }
+  }
+  toast(
+    failN ? `已上传 ${okN} 张鉴定，失败 ${failN} 张` : `已上传 ${okN} 张鉴定结果到自然在线`,
+    3000,
+  );
   if (okN) {
-    // 站点那边名字已经变了，重新拉一遍，卡片显示的就是网页端的新鉴定结果
+    // 站点那边名字已经变了：两个视图都重新拉一遍，卡片显示网页端返回的新鉴定结果。
+    // /api/nat/photos 每次直连站点、不走缓存，所以这里拿到的就是同步后的新值。
     try {
       await natLoadPhotos();
     } catch {
-      /* 刷新失败不影响已写回的结果 */
+      /* 刷新失败不影响已提交的结果 */
+    }
+    if (S.mode === 'album' && NAT.album) {
+      try {
+        await loadAlbumPhotos();
+      } catch {
+        /* 同上 */
+      }
+      renderAlbum();
     }
   }
 }
 
 function nwBind() {
-  $('natWriteBtn').onclick = nwOpen;
+  if ($('natReIdBtn')) $('natReIdBtn').onclick = nwOpenReId;
+  // 批量鉴定搬到「标注」页相册端：自然在线页只管上传 / 下载
+  if ($('tagBatchBtn')) $('tagBatchBtn').onclick = nwOpenBatch;
+  if ($('natReIdShortcut')) $('natReIdShortcut').onclick = nwOpenReId;
   $('nwCancel').onclick = nwClose;
   $('nwBatch').onchange = nwSyncBatch;
   $('nwSelAll').onclick = () => {
@@ -4483,6 +5608,11 @@ function nwBind() {
     if (c) nwLock(c.dataset.id, c.dataset.zh, c.dataset.sp);
   };
   $('nwList').onclick = (e) => {
+    const del = e.target.closest('.nw-row-del');
+    if (del) {
+      nwRemoveRecord(del.dataset.del);
+      return;
+    }
     const c = e.target.closest('.nw-chk-row');
     if (!c) return;
     const r = NW.rows.find((x) => x.photoId === c.dataset.id);
@@ -4499,31 +5629,8 @@ function nwBind() {
   });
 }
 
-/* ---------------- 照片移动 / 拖拽本机文件夹 / 标注页直传 ---------------- */
-
-/** 把勾选的照片移到另一个相册：走站点原生接口，photoId 不变、不重新上传 */
-async function natMovePhotos() {
-  const ids = [...NAT.sel];
-  const to = $('natMoveSel').value;
-  if (!ids.length) return toast('先勾选要移动的照片');
-  if (!to) return toast('先选一个目标相册');
-  if (NAT.album && NAT.album.id === to) return toast('已经在这个相册里了');
-  const hit = NAT.albums.find((a) => a.id === to);
-  const btn = $('natMoveBtn');
-  btn.disabled = true;
-  btn.textContent = '移动中…';
-  try {
-    const r = await post('/api/nat/photos/move', { albumId: to, ids });
-    toast(`已把 ${r.moved} 张移到「${hit ? hit.title : '相册'}」`, 3200);
-    NAT.sel.clear();
-    await natLoadAlbums();
-    if (NAT.album) await natLoadPhotos();
-  } catch (err) {
-    toast('移动失败：' + err.message, 4500);
-  } finally {
-    natSyncSel();
-  }
-}
+/* ---------------- 拖拽本机文件夹（自然在线页的上传入口） ----------------
+ * 照片移动、标注页直传相册等入口已下线：本页只保留上传与下载。 */
 
 /* 浏览器拖进来的是 DataTransfer，拿不到本机路径；用 webkitGetAsEntry 递归读目录 */
 function natReadEntries(reader) {
@@ -4611,11 +5718,34 @@ async function natHandleDrop(dt, target) {
 }
 
 const DIR_MIME = 'application/x-tagden-dir';
+/** 本页卡片拖出来的照片路径（JSON 数组）；和 DIR_MIME 分开，drop 时好区分 */
+const PATH_MIME = 'application/x-tagden-paths';
 
-/** 这次拖的是「本程序的文件夹节点」还是「系统资源管理器里的文件」 */
+/** 这次拖的是「本程序文件夹节点」/「本页照片」/「系统文件管理器里的文件」 */
 function dropKinds(dt) {
   const types = dt ? [...(dt.types || [])] : [];
-  return { dir: types.includes(DIR_MIME), files: types.includes('Files') };
+  return { dir: types.includes(DIR_MIME), paths: types.includes(PATH_MIME), files: types.includes('Files') };
+}
+
+/** 自然在线·本机端卡片起拖：文件夹给目录，照片给路径列表（勾了多张就整批拖） */
+function natDragStart(e) {
+  if (NAT.side !== 'local') return;
+  const folder = e.target.closest && e.target.closest('.card.folder');
+  if (folder && folder.dataset.d) {
+    e.dataTransfer.effectAllowed = 'copy';
+    e.dataTransfer.setData(DIR_MIME, folder.dataset.d);
+    e.dataTransfer.setData('text/plain', folder.dataset.d);
+    NAT.dragging = true;
+    return;
+  }
+  const card = e.target.closest && e.target.closest('.card[data-p]');
+  if (!card || !card.dataset.p) return;
+  const p = card.dataset.p;
+  const paths = NAT.localSel.has(p) && NAT.localSel.size > 1 ? [...NAT.localSel] : [p];
+  e.dataTransfer.effectAllowed = 'copy';
+  e.dataTransfer.setData(PATH_MIME, JSON.stringify(paths));
+  e.dataTransfer.setData('text/plain', paths.join('\n'));
+  NAT.dragging = true;
 }
 
 /**
@@ -4646,11 +5776,40 @@ async function natHandleDirDrop(dirPath, target) {
   }
 }
 
-function natBindDrop(el, getTarget, highlight) {
+/**
+ * 把本页拖出的照片传到某个相册：只发路径，服务端从本机读图上传，不经浏览器中转。
+ * 拖到「＋ 新建相册」时，用照片所在文件夹的名字建一个。
+ */
+async function natHandlePathsDrop(paths, target) {
+  if (!NAT.loggedIn) return toast('先在「自然在线」页登录');
+  const list = (paths || []).filter(Boolean);
+  if (!list.length) return;
+  let albumId = target.id;
+  if (target.kind === 'new') {
+    const dir = String(list[0]).replace(/[\\/][^\\/]*$/, '');
+    const name = dir.split(/[\\/]/).filter(Boolean).pop()
+      || `拖入的照片 ${new Date().toISOString().slice(0, 10)}`;
+    const r = await post('/api/nat/albums', { title: name });
+    albumId = r.id;
+    toast(`新建相册「${name}」，开始上传 ${list.length} 张`, 2600);
+  }
+  const ok = await natRunUpload(list, 'album', albumId);
+  if (ok && ok.ok !== false) {
+    await natLoadAlbums();
+    if (NAT.album && String(NAT.album.id) === String(albumId)) await natLoadPhotos();
+  }
+}
+
+function natBindDrop(el, getTarget, highlight, allow) {
   if (!el) return;
+  const ok = allow || {};
+  const takes = (k) =>
+    (k.dir && ok.dir !== false)
+    || (k.paths && ok.paths !== false)
+    || (k.files && ok.files !== false);
   el.addEventListener('dragover', (e) => {
     const k = dropKinds(e.dataTransfer);
-    if (!k.dir && !k.files) return;
+    if (!takes(k)) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = 'copy';
     if (highlight) highlight(e, true);
@@ -4662,14 +5821,20 @@ function natBindDrop(el, getTarget, highlight) {
     else el.classList.remove('drop-on');
   });
   el.addEventListener('drop', async (e) => {
+    const k = dropKinds(e.dataTransfer);
+    if (!takes(k)) return;
     e.preventDefault();
     if (highlight) highlight(e, false);
     else el.classList.remove('drop-on');
-    const k = dropKinds(e.dataTransfer);
     const dirPath = k.dir ? e.dataTransfer.getData(DIR_MIME) : '';
+    let paths = [];
+    if (k.paths) {
+      try { paths = JSON.parse(e.dataTransfer.getData(PATH_MIME) || '[]'); } catch { paths = []; }
+    }
     const t = getTarget(e);
     if (!t) return toast('先在右边选一个目标相册');
     if (dirPath) return natHandleDirDrop(dirPath, t);
+    if (paths.length) return natHandlePathsDrop(paths, t);
     await natHandleDrop(e.dataTransfer, t);
   });
 }
@@ -4690,39 +5855,18 @@ function bindNatDrops() {
   );
   natBindDrop($('natDropZone'), () => ({ kind: 'new' }));
   for (const el of [$('natGrid'), $('natEmpty')]) {
-    natBindDrop(el, () => (NAT.album ? { kind: 'album', id: NAT.album.id } : null));
+    // 照片区只接「系统里拖进来的文件 / 左栏的文件夹」；本页卡片拖到这儿不算上传，
+    // 免得手一抖在网格里松手就传了一遍
+    natBindDrop(el, () => (NAT.album ? { kind: 'album', id: NAT.album.id } : null), null, { paths: false });
   }
-}
-
-/** 标注页：下拉选相册（或新建）后，把勾选的本机图传上去 */
-async function tagNatUpload() {
-  const files = [...S.sel];
-  if (!files.length) return toast('先勾选图片');
-  await natEnsureAlbums();
-  const id = $('tagNatSel').value;
-  if (!id) return toast('先选一个自然在线相册');
-  if (id === '__new__') return;
-  await natRunUpload(files, 'album', id);
-}
-
-async function tagNatCreate() {
-  const name = $('tagNatNewName').value.trim();
-  if (!name) return toast('给新相册起个名字');
-  const ok = $('tagNatNewOk');
-  ok.disabled = true;
-  try {
-    const r = await post('/api/nat/albums', { title: name });
-    await natLoadAlbums();
-    $('tagNatSel').value = r.id;
-    $('tagNatNewBox').hidden = true;
-    $('tagNatNewName').value = '';
-    natSyncTagBtn();
-    toast(`已新建相册「${name}」`, 2200);
-    if (S.sel.size) await tagNatUpload();
-  } catch (err) {
-    toast('新建相册失败：' + err.message, 4000);
-  } finally {
-    ok.disabled = false;
+  // 本机端卡片起拖（照片按路径、子文件夹按目录）——监听挂在网格上，重铺卡片不用重绑
+  const grid = $('natGrid');
+  if (grid) {
+    grid.addEventListener('dragstart', natDragStart);
+    grid.addEventListener('dragend', () => {
+      // dragend 后面偶尔还会补一个 click，稍等一下再放开，免得顺手进了文件夹
+      setTimeout(() => { NAT.dragging = false; }, 150);
+    });
   }
 }
 
@@ -4758,8 +5902,6 @@ function natRunUpload(files, mode, albumId) {
           return resolve({ ok: false, error: j.error });
         }
         setNatProgress(j.done, j.total, j.current ? `正在传 ${j.current}（${j.done}/${j.total}）` : `收尾…（${j.done}/${j.total}）`);
-        const tb = $('tagNatBtn');
-        if (tb) tb.textContent = `上传 ${j.done}/${j.total}`;
         if (!j.finished) {
           NAT.timer = setTimeout(tick, 500);
           return;
@@ -4827,46 +5969,133 @@ async function natFinishUpload(job, error) {
   if (NAT.side === 'local') { NAT.localSel.clear(); renderNatLocal(); }
 }
 
-async function natDownload() {
-  const ids = [...NAT.sel];
-  if (!ids.length) return toast('先勾选要下载的照片');
-  toast(`正在打包 ${ids.length} 张…`, 3000);
+/* ---------------- 自然在线页：下载原图 / 下载 KML 轨迹 / 清除缓存 ----------------
+ * 和 nature-client 同一套做法：原图由本机服务逐张取回、打成 zip（站点不用再打包一次）；
+ * KML 用照片里的 GPS 在浏览器里就地生成；清除缓存只清本机图片字节，
+ * 不动账号令牌、待上传鉴定记录和评分结果。
+ */
+
+function natTriggerDownload(blob, name) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
+function natXesc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;',
+  }[c]));
+}
+
+/** 下载 / 导出都以勾选优先；没勾就按本页全部处理 */
+function natPickedPhotos() {
+  if (NAT.side !== 'album') return [];
+  const list = NAT.photos || [];
+  const picked = list.filter((p) => NAT.sel.has(String(p.photoId)));
+  return picked.length ? picked : list.slice();
+}
+
+async function natDownloadOriginal() {
+  const items = natPickedPhotos();
+  if (!items.length) return toast('先在左栏切到「相册端」并选一个相册', 3200);
+  const payload = items
+    .map((p) => {
+      const url = p.original || p.full || '';
+      if (!url) return null;
+      const ext = (String(p.fileName || '').split('.').pop() || 'jpg').replace(/[^\w]/g, '') || 'jpg';
+      const base = safeName([p.cname || '', p.lname || '', p.photoId].filter(Boolean).join('_')) || String(p.photoId);
+      return { url, name: `${base}.${ext}` };
+    })
+    .filter(Boolean);
+  if (!payload.length) return toast('这些照片没有可用的原图地址（站点未返回图片路径）', 3600);
+  const btn = $('natOrigBtn');
+  if (btn) btn.disabled = true;
+  toast(`正在打包 ${payload.length} 张原图…`, 3000);
   try {
-    const res = await fetch('/api/nat/download', {
+    const res = await fetch('/api/nat/original-zip', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ ids }),
+      body: JSON.stringify({ items: payload }),
     });
     if (!res.ok) {
       const j = await res.json().catch(() => ({}));
       throw new Error(j.error || `HTTP ${res.status}`);
     }
-    const blob = await res.blob();
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = `nature-photos-${new Date().toISOString().slice(0, 10)}.zip`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
-    toast('已开始下载（站点给的是 zip）');
+    natTriggerDownload(await res.blob(), `nature-originals-${new Date().toISOString().slice(0, 10)}.zip`);
+    toast(`已下载 ${payload.length} 张原图（zip）`);
   } catch (err) {
-    toast('下载失败：' + err.message, 4000);
+    toast('下载原图失败：' + err.message, 4000);
+  } finally {
+    if (btn) btn.disabled = false;
+    natSyncSel();
   }
 }
 
-async function natDeletePhotos() {
-  const ids = [...NAT.sel];
-  if (!ids.length) return toast('先勾选照片');
-  if (!window.confirm(`从相册里删掉这 ${ids.length} 张？站点上删了就找不回来。`)) return;
+/** 由照片 GPS 生成 KML：一条 gx:Track 轨迹连线 + 每张照片一个点 */
+function natBuildKml(items) {
+  const pts = items
+    .filter((it) => it.gps && it.gps.lat != null && it.gps.lng != null)
+    .sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')));
+  const trackCoords = pts
+    .map((it) => `          <gx:coord>${Number(it.gps.lng)} ${Number(it.gps.lat)} 0</gx:coord>`)
+    .join('\n');
+  const placemarks = pts
+    .map((it) => {
+      const nm = natXesc([it.cname, it.lname].filter(Boolean).join(' ') || it.fileName || it.photoId);
+      const desc = natXesc([it.date, it.place].filter(Boolean).join(' · '));
+      return `        <Placemark>
+          <name>${nm}</name>
+          <description>${desc}</description>
+          <Point><coordinates>${Number(it.gps.lng)},${Number(it.gps.lat)},0</coordinates></Point>
+        </Placemark>`;
+    })
+    .join('\n');
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2" xmlns:gx="http://www.google.com/kml/ext/2.2">
+  <Document>
+    <name>自然在线调查轨迹</name>
+    <Snippet>由物种标注工坊生成（${pts.length} 个带 GPS 的点）</Snippet>
+    <Folder>
+      <name>调查轨迹</name>
+      <Placemark>
+        <name>轨迹连线</name>
+        <gx:Track>
+          <altitudeMode>clampToGround</altitudeMode>
+${trackCoords}
+        </gx:Track>
+      </Placemark>
+${placemarks}
+    </Folder>
+  </Document>
+</kml>`;
+}
+
+function natDownloadKml() {
+  const items = natPickedPhotos();
+  if (!items.length) return toast('先在左栏切到「相册端」并选一个相册', 3200);
+  const withGps = items.filter((p) => p.gps && p.gps.lat != null && p.gps.lng != null).length;
+  if (!withGps) return toast('当前照片没有 GPS 信息，无法生成轨迹（站点未返回经纬度）', 3600);
+  const blob = new Blob([natBuildKml(items)], { type: 'application/vnd.google-earth.kml+xml' });
+  natTriggerDownload(blob, `nature-track-${new Date().toISOString().slice(0, 10)}.kml`);
+  toast(`已生成 KML 轨迹（${withGps} 个带 GPS 的点）`);
+}
+
+async function natClearCache() {
+  if (!window.confirm(
+    '清除本机缓存的自然在线图片？\n清除后下次打开会重新从站点读取；账号登录、待上传的鉴定记录和评分结果都不受影响。',
+  )) return;
   try {
-    const r = await post('/api/nat/photos/delete', { ids });
-    toast(`已删除 ${r.deleted} 张`);
-    NAT.sel.clear();
-    await natLoadPhotos();
-    await natLoadAlbums();
+    const r = await post('/api/nat/cache/clear', {});
+    toast(`已清除 ${r.files || 0} 个缓存图片${r.bytes ? `（${kb(r.bytes)}）` : ''}`);
+    if (NAT.loggedIn) await natLoadAlbums();
+    if (NAT.side === 'album' && NAT.album) await natLoadPhotos();
   } catch (err) {
-    toast('删除失败：' + err.message, 4000);
+    toast('清除缓存失败：' + err.message, 4000);
   }
 }
 
@@ -4948,44 +6177,42 @@ function bindGutter(id, opt) {
 }
 
 function bindNature() {
-  // 移动照片 + 标注页直传相册
-  $('natMoveBtn').onclick = () => natMovePhotos();
-  $('natMoveSel').onchange = () => natSyncSel();
-  $('tagNatBtn').onclick = () => tagNatUpload();
-  $('tagNatSel').onchange = () => {
-    const box = $('tagNatNewBox');
-    if ($('tagNatSel').value === '__new__') {
-      const dir = String(S.state?.lastDir || '').split(/[\\/]/).filter(Boolean).pop();
-      $('tagNatNewName').value = dir || '';
-      box.hidden = false;
-      $('tagNatNewName').focus();
-    } else {
-      box.hidden = true;
-    }
-    natSyncTagBtn();
-  };
-  $('tagNatNewOk').onclick = () => tagNatCreate();
-  $('tagNatNewCancel').onclick = () => {
-    $('tagNatNewBox').hidden = true;
-    $('tagNatSel').value = '';
-    natSyncTagBtn();
-  };
-  $('tagNatNewName').onkeydown = (e) => {
-    if (e.key === 'Enter') tagNatCreate();
-    if (e.key === 'Escape') $('tagNatNewCancel').click();
-  };
-  bindNatDrops();
-
-  // 中间这块看什么：本机文件夹 / 相册照片
-  if ($('natSide')) {
-    $('natSide').onclick = (e) => {
-      const b = e.target.closest('button[data-side]');
-      if (!b) return;
-      if (b.dataset.side === NAT.side) return;
-      natSideSet(b.dataset.side);
+  // 标注页的本机端 / 相册端
+  if ($('srcSeg')) {
+    $('srcSeg').onclick = (e) => {
+      const b = e.target.closest('button[data-src]');
+      if (!b || b.disabled) return;
+      // 自然在线页点过右边相册后，左栏仍停在本机端；再点一次「本机端」= 中间回到本机文件夹
+      if (b.dataset.src === 'local' && S.mode === 'local' && S.tab === 'nature' && NAT.side === 'album') {
+        NAT.side = 'local';
+        syncNatSideUI(true);
+        return;
+      }
+      setSource(b.dataset.src);
     };
   }
+  if ($('albumRail')) {
+    $('albumRail').onclick = (e) => {
+      const it = e.target.closest('.ar-item');
+      if (it) openAlbumHere(it.dataset.id, it.dataset.title);
+    };
+  }
+  if ($('albumRailRefresh')) {
+    $('albumRailRefresh').onclick = async () => {
+      NAT.albums = [];
+      await natEnsureAlbums();
+      renderAlbumRail();
+      if (NAT.album) await loadAlbumPhotos();
+    };
+  }
+  if ($('natWriteOne')) $('natWriteOne').onclick = () => natWriteOne();
+  bindNatDrops();
+
+  // 本页只管上传 / 下载；看本机文件夹还是相册照片，跟着左栏的「本机端 / 相册端」
   if ($('natLocalUp')) $('natLocalUp').onclick = natUploadLocal;
+  if ($('natOrigBtn')) $('natOrigBtn').onclick = natDownloadOriginal;
+  if ($('natKmlBtn')) $('natKmlBtn').onclick = natDownloadKml;
+  if ($('natClearCacheBtn')) $('natClearCacheBtn').onclick = natClearCache;
   if ($('natLocalOpen')) $('natLocalOpen').onclick = () => showTab('annotate');
 
   $('natCapImg').onclick = () => natCaptcha();
@@ -5041,10 +6268,7 @@ function bindNature() {
   };
   $('natUpMode').onchange = () => natSyncUpBtn();
   $('natUpBtn').onclick = () => natUpload();
-  $('natIdBtn').onclick = () => natIdentify();
-  if ($('natWriteBtn')) nwBind();
-  $('natDlBtn').onclick = () => natDownload();
-  $('natDelBtn').onclick = () => natDeletePhotos();
+  nwBind();
   $('natPgPrev').onclick = () => {
     if (NAT.page > 1) {
       NAT.page -= 1;
@@ -5093,6 +6317,12 @@ function bindNature() {
   $('natGrid').onclick = (e) => {
     // 刚框选完：吞掉这次 click，别把框到的又取消掉
     if (NAT.marqMoved) { NAT.marqMoved = false; return; }
+    // 刚把卡片拖到相册：拖拽收尾偶尔会补一个 click，别顺手进了文件夹
+    if (NAT.dragging) { NAT.dragging = false; return; }
+    if (NAT.side === 'local') {
+      const folder = e.target.closest('.card.folder');
+      if (folder && folder.dataset.d) { loadDir(folder.dataset.d); return; }
+    }
     const card = e.target.closest('.card');
     if (!card) return;
     if (NAT.side === 'local') {
@@ -5140,13 +6370,17 @@ const SCR = {
   detail: '', marqMoved: false,
   // 页面 AI 行用：上次选的是哪个引擎（关掉 AI 时也能记住）、本地扫到的 gguf 缓存
   aiLastEngine: 'cloud', llamaModels: null,
+  // 来源跟随左栏：album 时评分对象是自然在线相册里的照片（原图取回本机算，不上传）
+  mode: 'local', albumId: '', albumFiles: null,
 };
 // jsdom 验收要拿得到状态；浏览器里 window 一直存在
 if (typeof window !== 'undefined') window.SCR = SCR;
 
 const scIsImage = (n) => /\.(jpe?g|png|webp|bmp|tiff?)$/i.test(String(n || ''));
-/** 评分页列出的文件：优先用本页自己的目录，没有才退回标注页当前目录 */
-const scFiles = () => (SCR.files || S.files || []).filter((f) => scIsImage(f.name));
+/** 评分对象：本机端是本页目录（退回标注页目录），相册端是站点相册的伪文件 */
+const scFiles = () => SCR.mode === 'album'
+  ? (SCR.albumFiles || [])
+  : (SCR.files || S.files || []).filter((f) => scIsImage(f.name));
 
 function scWorker() {
   if (!SCR.worker) SCR.worker = new Worker('/score-worker.js');
@@ -5500,15 +6734,17 @@ async function scLocalListRender() {
 
 function scSyncSel() {
   const n = SCR.sel.size;
-  for (const id of ['scToTagBtn', 'scToNatBtn', 'scAiRunBtn']) {
+  const alb = SCR.mode === 'album';
+  // AI 判别目前只压本机 /img 图，相册端先锁上；连拍分组、评分分组、搬文件夹同理
+  if ($('scAiRunBtn')) {
+    $('scAiRunBtn').disabled = !n || SCR.running || alb;
+    $('scAiRunBtn').textContent = SCR.cfg && SCR.cfg.engine !== 'off' ? `AI 判别 ${n} 张` : 'AI 判别选中';
+  }
+  for (const id of ['scBurstBtn', 'scGroupBtn', 'scBelowGo', 'scBelowPick']) {
     const b = $(id);
-    if (b) b.disabled = !n || SCR.running;
+    if (b) b.disabled = alb;
   }
-  if ($('scAiRunBtn') && SCR.cfg && SCR.cfg.engine !== 'off') {
-    $('scAiRunBtn').textContent = `AI 判别 ${n} 张`;
-  } else if ($('scAiRunBtn')) {
-    $('scAiRunBtn').textContent = 'AI 判别选中';
-  }
+  if ($('scSource')) $('scSource').textContent = alb ? '相册端' : '本机端';
   // 全选 / 清空：没有可选的照片就灰掉；顺便把「已选 N 张」写出来
   const onPage = scPagePaths().length;
   if ($('scSelAll')) $('scSelAll').disabled = SCR.running || onPage === 0 || n >= onPage;
@@ -5548,6 +6784,7 @@ function scoreBadge(f) {
 }
 
 async function scLoad(dir) {
+  if (SCR.mode === 'album') return scLoadAlbum();
   const target = dir || SCR.dir || S.dir;
   if (!target) return;
   const prev = SCR.dir;
@@ -5601,12 +6838,59 @@ async function scLoad(dir) {
 }
 
 /**
+ * 相册端评分：把当前自然在线相册的照片铺成同样的评分卡片。
+ * 原图经本机代理 /api/nat/img 取回，在浏览器 Worker 里算技术分，照片不上传；
+ * 分数按 photoId 存在 /api/score/remote，和本机目录的「批内星级」互不影响。
+ */
+async function scLoadAlbum() {
+  const album = NAT.album;
+  SCR.dir = album ? `nat://album/${album.id}` : '';
+  SCR.dirMeta = null;
+  SCR.bursts = null;
+  SCR.groupMode = false;
+  scDetailClose();
+  // 照片由「切到相册端 / 打开相册」时已经拉好，这里只复用 NAT.photos。
+  // 不在这里再发一次列表请求：那会和 renderNatPhotos 的自动刷新互相触发。
+  SCR.albumId = album ? String(album.id) : '';
+  SCR.albumFiles = (NAT.photos || []).map((p) => ({
+    path: NAT_KEY + p.photoId,
+    name: String(p.photoId),
+    display: [p.cname, p.lname].filter(Boolean).join(' ') || p.fileName || String(p.photoId),
+    url: `/api/nat/img?u=${enc(p.full || p.thumb || '')}`,
+    thumbUrl: `/api/nat/img?u=${enc(p.thumb || p.full || '')}`,
+    nat: p,
+  }));
+  try {
+    const r = await api('/api/score/remote');
+    SCR.remote = r.items || {};
+    SCR.scores = {};
+    for (const [k, v] of Object.entries(SCR.remote)) if (v && v.rec) SCR.scores[k] = v.rec;
+  } catch {
+    SCR.remote = {};
+    SCR.scores = {};
+  }
+  SCR.counts = [0, 0, 0, 0];
+  SCR.invalid = 0;
+  SCR.sel.clear();
+  if ($('scDir')) {
+    $('scDir').textContent = album ? `当前相册：${album.title || album.id}` : '当前相册：—';
+    $('scDir').title = album ? String(album.title || album.id) : '先在左栏选一个自然在线相册';
+  }
+  if ($('scDirs')) $('scDirs').hidden = true;
+  scRender();
+  scSyncSel();
+  scAiPaint();
+  if (SCR.detail) scDetailOpen(SCR.detail);
+}
+
+/**
  * 评分页的子文件夹：和「标注」页一样铺成文件夹卡片网格（不是药丸标签）。
  * 这里只负责那条细栏 —— 「↑ 上一层」+ 本层张数；卡片交给 scDirCardsHtml() 混进网格。
  */
 function scDirsRender() {
   const box = $('scDirs');
   if (!box) return;
+  if (SCR.mode === 'album') { box.hidden = true; return; }
   const m = SCR.dirMeta;
   const subs = (m && m.dirs) || [];
   const hasUp = !!(m && m.parent);
@@ -5621,6 +6905,7 @@ function scDirsRender() {
  * 只把副标题从「文件夹」换成「文件夹 · N 张」，让人一眼知道哪层是空的。
  */
 function scDirCardsHtml() {
+  if (SCR.mode === 'album') return ''; // 相册端没有「子文件夹」
   const subs = (SCR.dirMeta && SCR.dirMeta.dirs) || [];
   if (!subs.length) return '';
   return subs.map((d) => {
@@ -5648,8 +6933,12 @@ function scRender() {
   if (star !== '') {
     files = files.filter((f) => {
       const r = SCR.scores[f.name];
-      if (!r || r.star === undefined) return false;
-      return star === '0' ? r.star === 0 || r.invalid : String(r.star) === star;
+      if (!r || (r.star === undefined && r.total == null)) return false;
+      // 相册端没有「批内星级」，按技术分折算成显示用的 0–3 星
+      const st = r.star !== undefined
+        ? Number(r.star)
+        : Math.max(0, Math.min(3, Math.round((Number(r.total) - 25) / 25)));
+      return star === '0' ? st === 0 || !!r.invalid : String(st) === star;
     });
   }
   // 连拍分组：一组只留封面，标题上写清组内还有几张
@@ -5683,21 +6972,31 @@ function scRender() {
     if (!files.length) {
       empty.innerHTML = star !== ''
         ? '这个星级下没有照片。<br>换一个筛选，或点右上角「开始评分」。'
-        : (SCR.dirMeta && SCR.dirMeta.dirs && SCR.dirMeta.dirs.length)
-          ? '这一层没有直接放图片，点上面的文件夹卡片继续评。'
-          : '这个文件夹没有可评分的图片。<br>在左边选一个装有照片的文件夹，再点「开始评分」。';
+        : SCR.mode === 'album'
+          ? '这个相册这一页没有照片。<br>先在左栏「相册端」选一个相册，再点「开始评分」（原图取回本机算，不上传）。'
+          : (SCR.dirMeta && SCR.dirMeta.dirs && SCR.dirMeta.dirs.length)
+            ? '这一层没有直接放图片，点上面的文件夹卡片继续评。'
+            : '这个文件夹没有可评分的图片。<br>在左边选一个装有照片的文件夹，再点「开始评分」。';
     }
   }
   const scored = Object.keys(SCR.scores).length;
-  $('scSummary').textContent = scored
-    ? `已评 ${scored} 张 · ★★★ ${SCR.counts[3]} / ★★ ${SCR.counts[2]} / ★ ${SCR.counts[1]} / 0★ ${SCR.counts[0]}${SCR.invalid ? ` · 废片 ${SCR.invalid}` : ''}${SCR.groupMode ? ' · 连拍已折叠' : ''}`
-    : '还没评分 · 点右上角「开始评分」，本机算法离线运行，不上传任何照片';
+  $('scSummary').textContent = SCR.mode === 'album'
+    ? (scored
+      ? `已评 ${scored} 张 · 相册照片按技术分排序（原图取回本机算，不参与本机批内星级）`
+      : '还没评分 · 点右上角「开始评分」，相册原图取回本机算，不上传任何照片')
+    : scored
+      ? `已评 ${scored} 张 · ★★★ ${SCR.counts[3]} / ★★ ${SCR.counts[2]} / ★ ${SCR.counts[1]} / 0★ ${SCR.counts[0]}${SCR.invalid ? ` · 废片 ${SCR.invalid}` : ''}${SCR.groupMode ? ' · 连拍已折叠' : ''}`
+      : '还没评分 · 点右上角「开始评分」，本机算法离线运行，不上传任何照片';
   // 筛选/排序会改变「本层可见张数」，全选按钮的可用状态要跟着走
   scSyncSel();
 }
 
 function scCardHtml(f, rec, covers) {
-  const star = rec && rec.star !== undefined ? Math.max(0, Math.min(3, rec.star)) : null;
+  const star = rec && rec.star !== undefined
+    ? Math.max(0, Math.min(3, rec.star))
+    : rec && rec.total != null
+      ? Math.max(0, Math.min(3, Math.round((Number(rec.total) - 25) / 25)))
+      : null;
   const starTxt = star === null ? '' : '★'.repeat(star) + '☆'.repeat(3 - star);
   const tags = rec && rec.tags ? String(rec.tags).split(';').filter(Boolean) : [];
   const extra = covers && covers.get(f.name) ? ` <span class="sc-ai">＋${covers.get(f.name) - 1} 张同组</span>` : '';
@@ -5708,14 +7007,17 @@ function scCardHtml(f, rec, covers) {
     ? '<span>未评分</span>'
     : `<b>${big}</b><span class="lb">${hasFinal ? '综合分' : '技术分'}</span>`
       + (rec.ai ? `<span class="sub">技术 ${rec.total} · AI ${rec.ai.score}</span>` : '');
-  return `<div class="card sc-card${SCR.sel.has(f.path) ? ' sel' : ''}${star === 0 ? ' s0' : ''}" data-p="${esc(f.path)}" data-n="${esc(f.name)}" title="${esc(f.name)}｜单击勾选，照片旁边看评分详情">
+  const nm = f.display || f.name;
+  // 相册端的图走本机代理；本机端还是 /img?path=
+  const src = f.thumbUrl || `/img?path=${enc(f.path)}&thumb=1`;
+  return `<div class="card sc-card${SCR.sel.has(f.path) ? ' sel' : ''}${star === 0 ? ' s0' : ''}" data-p="${esc(f.path)}" data-n="${esc(nm)}" title="${esc(nm)}｜单击勾选，照片旁边看评分详情">
     <div class="thumb">
-      <img loading="lazy" decoding="async" draggable="false" src="/img?path=${enc(f.path)}&amp;thumb=1" alt="">
+      <img loading="lazy" decoding="async" draggable="false" src="${esc(src)}" alt="">
       <span class="tick">${SCR.sel.has(f.path) ? '✓' : ''}</span>
       ${starTxt ? `<span class="sc-star" title="批内百分位 ${rec.pct != null ? Math.round(rec.pct * 100) + '%' : '—'}">${starTxt}</span>` : ''}
     </div>
     <div class="sc-meta">
-      <div class="nm" title="${esc(f.name)}">${esc(f.name)}</div>
+      <div class="nm" title="${esc(nm)}">${esc(nm)}</div>
       <div class="sc-nums">${nums}${extra}</div>
       ${tags.length ? `<div class="sc-tags" title="${esc(tags.join(' · '))}">${esc(tags.join(' · '))}</div>` : ''}
       ${rec && rec.ai ? `<div class="sc-ai" title="${esc(rec.ai.comment || '')}">${esc([rec.ai.kind, rec.ai.comment].filter(Boolean).join(' · ') || 'AI 已判别')}</div>` : ''}
@@ -5785,8 +7087,9 @@ function scDetailOpen(path) {
   if (!f || !box) { scDetailClose(); return; }
   SCR.detail = path;
   if ($('scDetailFile')) {
-    $('scDetailFile').textContent = f.name;
-    $('scDetailFile').title = f.name;
+    const nm = f.display || f.name;
+    $('scDetailFile').textContent = nm;
+    $('scDetailFile').title = nm;
   }
   const body = $('scDetailBody');
   if (body) body.innerHTML = scDetailHtml(f, SCR.scores[f.name] || null);
@@ -5913,6 +7216,7 @@ function scPickedFiles() {
 }
 
 async function scRun() {
+  if (SCR.mode === 'album') return scRunAlbum();
   if (SCR.running || !SCR.dir) return;
   // 勾了几张就只评这几张（用户预期的「我选中的那几张」）；没勾才整层评
   const picked = scPickedFiles();
@@ -5964,8 +7268,50 @@ async function scRun() {
   }
 }
 
+/** 相册端评分：原图经本机代理取回，Worker 用 remote 模式算，分数按 photoId 落盘 */
+async function scRunAlbum() {
+  if (SCR.running) return;
+  const picked = scPickedFiles();
+  const files = picked.length ? picked : scFiles();
+  if (!files.length) return toast('这个相册没有可评分的照片；先在左栏选一个相册', 3200);
+  const todo = files.filter((f) => !SCR.scores[f.name] || SCR.scores[f.name].stale);
+  if (!todo.length) {
+    toast(picked.length
+      ? `选中的 ${files.length} 张都评过了。想重评就先勾上它们点「清除评分」。`
+      : '这一页都评过了。想重评就先点「清除评分」。', 4000);
+    return;
+  }
+  const items = todo.map((f) => ({ key: f.name, name: f.display || f.name, url: f.url, meta: {} }));
+  SCR.running = true;
+  scProgress(true, 0, todo.length, `准备评分 ${todo.length} 张${picked.length ? '（只评勾选的）' : ''}…`);
+  scSyncSel();
+  let failed = 0;
+  try {
+    const r = await scTask('remote', items, {}, (m) => {
+      if (m.rec && m.key) {
+        SCR.scores[m.key] = m.rec;
+        SCR.remote[m.key] = { rec: m.rec, name: m.name, source: 'nature' };
+        post('/api/score/remote', { key: m.key, name: m.name, rec: m.rec, source: 'nature' })
+          .catch(() => { /* 缓存写失败不挡显示 */ });
+      }
+      if (m.error) failed += 1;
+      scProgress(true, m.done, m.total, `${m.done}/${m.total}  ${m.error ? '跳过 ' + m.name : esc(m.name || '')}`);
+    });
+    for (const it of items) if (!r.entries[it.key]) failed += 1;
+    scRender();
+    toast(`评分完成 ${Object.keys(r.entries).length} 张${failed ? `，跳过 ${failed} 张` : ''}${r.cancelled ? '（已停止）' : ''}`, 3000);
+  } catch (err) {
+    toast('评分失败：' + err.message, 4000);
+  } finally {
+    SCR.running = false;
+    scProgress(false);
+    scSyncSel();
+  }
+}
+
 /** AI 判别：Worker 压图 → 服务端转发到云端 / 本地 llama-server → 结果写回评分缓存 */
 async function scAiRun() {
+  if (SCR.mode === 'album') { toast('AI 语义评分目前只支持本机端照片', 3000); return; }
   if (SCR.running) { toast('上一个任务还在跑，等它结束再点', 2800); return; }
   if (!SCR.cfg || SCR.cfg.engine === 'off') {
     toast('先在页面上勾选「AI 语义评分」并选一个引擎', 3600);
@@ -6444,6 +7790,20 @@ async function scClear() {
   // 和「开始评分」同一套口径：勾了就只清勾选的那几张
   const picked = scPickedFiles();
   const names = picked.length ? picked.map((f) => f.name) : null;
+  if (SCR.mode === 'album') {
+    const keys = names || scFiles().map((f) => f.name);
+    if (!keys.length) return;
+    if (!confirm(keys.length && names
+      ? `清掉勾选的 ${keys.length} 张评分记录？站点照片本身不会动。`
+      : `清掉这个相册已评的 ${keys.length} 张评分记录？站点照片本身不会动。`)) return;
+    try {
+      await post('/api/score/remote/clear', { keys });
+      for (const k of keys) { delete SCR.scores[k]; delete SCR.remote[k]; }
+      scRender();
+      toast(`已清除 ${keys.length} 张的评分`, 2400);
+    } catch (err) { toast('清除失败：' + err.message, 3000); }
+    return;
+  }
   const ask = names
     ? `清掉勾选的 ${names.length} 张评分记录？照片本身不会动。`
     : '还没有勾选照片，会清掉整个文件夹的评分记录。照片本身不会动。<br><br>只想清几张的话，先把它们勾上再点这里。';
@@ -6461,6 +7821,7 @@ async function scClear() {
 }
 
 async function scBursts() {
+  if (SCR.mode === 'album') { toast('连拍分组只支持本机端照片', 2600); return; }
   if (!SCR.dir) return;
   SCR.groupMode = !SCR.groupMode;
   if (SCR.groupMode && !SCR.bursts) {
@@ -6472,37 +7833,25 @@ async function scBursts() {
   if (SCR.groupMode) toast(`折叠了 ${(SCR.bursts?.clusters || []).length} 组连拍，每组只留封面`, 2600);
 }
 
-async function scToTag() {
-  const n = SCR.sel.size;
-  if (!n) return;
-  const paths = [...SCR.sel];
-  // 评分页可能已经点进子文件夹了：标注页也要切到同一个目录，
-  // 否则勾中的图不在标注页网格里，用户会以为丢了
-  if (SCR.dir && SCR.dir !== S.dir) {
-    await loadDir(SCR.dir);
-    SCR.follow = SCR.dir;
-  }
-  for (const p of paths) S.sel.add(p);
-  showTab('annotate');
-  render();
-  updateCount();
-  toast(`已把 ${n} 张送去标注页并勾选`, 2400);
-}
-
-async function scToNat() {
-  if (SCR.running) return;
-  await natEnsureAlbums();
-  const v = $('scNatSel').value;
-  if (!v) { toast('先选一个目标相册', 2600); return; }
-  const files = [...SCR.sel];
-  if (!files.length) return;
-  const r = await natRunUpload(files, 'album', v);
-  if (r && r.ok) toast(`已把 ${files.length} 张传到自然在线相册`, 2800);
-}
-
-/** 切到评分页：左边树换了目录才跟着跳；在页内点进子文件夹后，来回切标签不会被打回上一层 */
+/**
+ * 切到评分页：评分对象跟随左栏的「本机端 / 相册端」。
+ * 本机端：左边树换了目录才跟着跳；在页内点进子文件夹后，来回切标签不会被打回上一层。
+ * 相册端：换了相册就重新把这一页照片铺出来。
+ */
 function scoreOpen() {
-  if (!SCR.dir || SCR.follow !== S.dir) {
+  const mode = S.mode === 'album' ? 'album' : 'local';
+  if (SCR.mode !== mode) {
+    SCR.mode = mode;
+    SCR.dir = '';
+    SCR.sel.clear();
+    SCR.detail = '';
+    scDetailClose();
+  }
+  if (SCR.mode === 'album') {
+    const aid = NAT.album ? String(NAT.album.id) : '';
+    if (SCR.albumId !== aid || !SCR.albumFiles) scLoadAlbum();
+    else { scDirsRender(); scRender(); }
+  } else if (!SCR.dir || SCR.follow !== S.dir) {
     SCR.follow = S.dir;
     scLoad(S.dir);
   } else {
@@ -6510,6 +7859,7 @@ function scoreOpen() {
     scRender();
   }
   if (!SCR.cfg) scCfgLoad(); else scAiPaint();
+  scSyncSel();
 }
 
 /* ---------------- 评分分组（照原版评分器的分档页） ----------------
@@ -6590,6 +7940,7 @@ function scBelowStat() {
 }
 
 function scGroupToggle() {
+  if (SCR.mode === 'album') { toast('评分分组只支持本机端照片', 2600); return; }
   SG.view = !SG.view;
   const box = $('scGroups');
   const body = $('scBody');
@@ -6700,6 +8051,7 @@ function scMoveFiles(names, label) {
 }
 
 function scBelowGo() {
+  if (SCR.mode === 'album') { toast('按分数搬照片只支持本机端', 2600); return; }
   const below = scBelowValue();
   if (below === null) return toast('请填一个 0–100 的分数');
   const names = scBelowNames();
@@ -6731,10 +8083,7 @@ function bindScore() {
   $('scBelowPick').onclick = scPickDest;
   $('scBelowGo').onclick = scBelowGo;
   $('scClearBtn').onclick = scClear;
-  $('scToTagBtn').onclick = scToTag;
-  $('scToNatBtn').onclick = scToNat;
   $('scAiRunBtn').onclick = scAiRun;
-  $('scNatSel').onchange = () => scSyncSel();
   // 评分页的「↑ 上一层」：只换评分目录，不动左边树
   if ($('scDirs')) {
     $('scDirs').onclick = (e) => {
@@ -6867,22 +8216,38 @@ function bindScore() {
   if ($('scLlamaStart')) $('scLlamaStart').onclick = scLlamaStart;
   if ($('scLlamaStop')) $('scLlamaStop').onclick = scLlamaStop;
   if ($('scOpenModels')) $('scOpenModels').onclick = scOpenModels;
-  // 自然在线页：给勾选的站点照片评分
-  if ($('natScoreBtn')) $('natScoreBtn').onclick = natScoreSelected;
   scSyncSel();
 }
 
 /* ---------------- 自然在线相册照片的评分（取回原图在本机算） ---------------- */
 
+/** 缩略图右上角的星级角标：评分页相册端的 key 就是 photoId，算完这里能直接看见 */
+function natScoreBadge(p) {
+  const r = SCR.remote[String(p.photoId)];
+  if (!r) return '';
+  if (r.busy) return '<span class="score-badge" title="正在取回原图评分"><span class="spin"></span></span>';
+  if (r.error) return `<span class="score-badge" title="${esc(r.error)}">!</span>`;
+  const rec = r.rec || {};
+  if (rec.total == null) return '';
+  const base = rec.final != null ? rec.final : rec.total;
+  const s = Math.min(3, Math.max(0, Math.round((base - 25) / 25)));
+  const ai = rec.ai && rec.ai.score != null ? `，AI ${rec.ai.score}` : '';
+  const tip = `${rec.final != null ? '综合' : '技术'}分 ${base}${ai}`;
+  return `<span class="score-badge" title="${esc(tip)}">${'★'.repeat(s) || '☆'}${s < 3 ? '☆'.repeat(3 - s) : ''}</span>`;
+}
+
 function natScoreLine(p) {
-  const r = SCR.remote[p.photoId];
+  const r = SCR.remote[String(p.photoId)];
   if (!r) return '';
   if (r.busy) return '<div class="idr run"><span class="spin"></span>评分中…</div>';
   if (r.error) return `<div class="idr bad" title="${esc(r.error)}">评分失败</div>`;
   const rec = r.rec || {};
   if (rec.total == null) return '';
-  const s = Math.min(3, Math.max(0, Math.round((rec.total - 25) / 25)));
-  return `<div class="idr ${rec.total >= 70 ? 'ok' : 'new'}" title="${esc((rec.tags || '').replace(/;/g, ' · ') || '本机技术评分')}">技术分 ${rec.total} ${'★'.repeat(s)}${'☆'.repeat(3 - s)}</div>`;
+  const base = rec.final != null ? rec.final : rec.total;
+  const s = Math.min(3, Math.max(0, Math.round((base - 25) / 25)));
+  const ai = rec.ai && rec.ai.score != null ? ` · AI ${rec.ai.score}` : '';
+  const tags = String(rec.tags || '').replace(/;/g, ' · ');
+  return `<div class="idr ${base >= 70 ? 'ok' : 'new'}" title="${esc(tags || '本机技术评分')}">${rec.final != null ? '综合' : '技术'} ${base}${ai} ${'★'.repeat(s)}${'☆'.repeat(3 - s)}</div>`;
 }
 
 async function natScoreSelected() {

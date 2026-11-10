@@ -29,6 +29,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { execFileSync } = require('node:child_process');
 const { buildBundle } = require('./build/bundle');
+const { resolvePublicKey, fingerprint } = require('./build/signing');
 const { createZip } = require('./build/zip');
 const { extractFile } = require('./build/tar');
 
@@ -198,13 +199,20 @@ async function buildArch(arch, ctx) {
   fs.mkdirSync(OUT_DIR, { recursive: true });
 
   // 一份 main.js 给所有架构用：程序代码与 CPU 无关
+  const updatePublicKey = resolvePublicKey(ROOT, process.argv.slice(2));
+  const keyId = updatePublicKey ? fingerprint(updatePublicKey) : '';
   const mainJs = buildBundle(ROOT, {
     name: '物种标注工坊',
     version,
     updateUrl,
+    updatePublicKey,
+    updatePublicKeyFingerprint: keyId,
+    requireSignedUpdates: Boolean(updatePublicKey),
     builtAt: new Date().toISOString(),
   });
   console.log(`→ 程序包 main.js ${(Buffer.byteLength(mainJs) / 1024).toFixed(1)} KB`);
+  if (updatePublicKey) console.log(`→ 更新签名公钥 ${fingerprint(updatePublicKey)}（本版强制验签）`);
+  else console.log('→ 未配置 update-pubkey.pem：更新只校验 SHA-256（建议先跑 tools/update-keygen.js）');
 
   const checkPath = path.join(OUT_DIR, '~check-main.js');
   fs.writeFileSync(checkPath, mainJs, 'utf8');
@@ -229,6 +237,7 @@ async function buildArch(arch, ctx) {
     size: buf.length,
     sha256: crypto.createHash('sha256').update(buf).digest('hex'),
     pubDate: new Date().toISOString().slice(0, 10),
+    ...(keyId ? { keyId } : {}),
   };
   fs.writeFileSync(path.join(OUT_DIR, 'latest-mac.json'), JSON.stringify(manifest, null, 2) + '\n', 'utf8');
 

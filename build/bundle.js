@@ -17,13 +17,18 @@ const MODULES = [
   'lib/datadir.js',
   'lib/version.js',
   'lib/updater.js',
+  'lib/update-sign.js',
+  'lib/delta.js',
   'lib/assets.js',
   'lib/http.js',
   'lib/parse.js',
   'lib/adapters.js',
   'lib/aggregate.js',
+  // 识别结果缓存（同图同站点复用上次结果）：漏了它，exe 会报「模块未打包」
+  'lib/identify-cache.js',
   // 大陆中文名（内置《中国生物物种名录》索引）：漏了它，exe 会报「模块未打包」
   'lib/colcn.js',
+  'lib/regions.js',
   'lib/ebird.js',
   'lib/inat.js',
   'lib/ppbc.js',
@@ -60,6 +65,8 @@ const BIN_ASSETS = [
   // 内置《中国生物物种名录》学名→中文名索引（gzip，~1.7 MB）。
   // 必须内联：绿色版 exe 旁边不会带 public/，索引不能靠外部文件。
   'colcn.bin',
+  // 离线行政区划索引（GeoNames，gzip，约 24 KB）
+  'regions.bin',
 ];
 /**
  * 二进制资源（在 vendor/ 下，不在 public/）：内置 llama.cpp 运行库整包

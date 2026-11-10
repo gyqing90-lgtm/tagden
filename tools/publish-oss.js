@@ -9,6 +9,8 @@
  *                                          省掉 80MB 的重复上传；sha256 仍会核对）
  *   node tools/publish-oss.js --dry-run    只校验配置与文件，不发请求
  *   node tools/publish-oss.js --verify     上传后再回读核对一遍
+ *   node tools/publish-oss.js --config ~/.tagden/oss.config.json
+ *                                          指定仓库外的 OSS 凭据文件
  *
  * 和聚合台那个脚本的关键差别：**所有 key 都带 tagden/ 前缀**。
  * 两个程序共用同一个桶，聚合台的 latest.json 在根目录，混在一起会让
@@ -19,19 +21,24 @@
  *   tagden/tagden-mac-*.zip   本来就是固定名
  * 这样发在微信群里的那段下载文案写一次就够了，不用每发一版就去改群消息。
  *
- * 配置来源：环境变量 > 本目录 oss.config.json > ../bio-id-hub/oss.config.json
- *   （跟聚合台用同一个桶、同一对 AccessKey，所以没单独放一份也照样能发）
+ * 配置来源：字段级环境变量 > --config > OSS_CONFIG > ~/.tagden/oss.config.json > 项目根旧文件（仅兼容）
+ *   （跟聚合台共用桶；凭据请各自放在 ~/.tagden/oss.config.json 或用 OSS_* 环境变量）
  */
 
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const https = require('node:https');
+const updateSign = require('../lib/update-sign');
+const { resolvePublicKey, fingerprint } = require('../build/signing');
 
 const ROOT = path.join(__dirname, '..');
 const DIST = path.join(ROOT, 'dist');
 const MAC_DIST = path.join(ROOT, 'dist-mac');
-const CFG_FILES = [path.join(ROOT, 'oss.config.json'), path.join(ROOT, '..', 'bio-id-hub', 'oss.config.json')];
+// 配置优先级：--config > OSS_CONFIG > ~/.tagden/oss.config.json > 项目根（旧位置，仅兼容）
+const HOME_CFG = path.join(os.homedir(), '.tagden', 'oss.config.json');
+const CFG_FILES = [HOME_CFG, path.join(ROOT, 'oss.config.json')];
 
 /** OSS 上的目录前缀：本程序的发布物都在 tagden/ 下 */
 const PREFIX = 'tagden/';
@@ -43,6 +50,39 @@ const DRY = argv.includes('--dry-run');
 const VERIFY = argv.includes('--verify');
 const WITH_MAC = argv.includes('--with-mac');
 const MANIFEST_ONLY = argv.includes('--manifest-only');
+const CONFIG_ARG = (() => {
+  const i = argv.indexOf('--config');
+  return i >= 0 && argv[i + 1] ? path.resolve(ROOT, argv[i + 1]) : '';
+})();
+
+/**
+ * 发布前验签：项目里配了 update-pubkey.pem 就要求两个清单都带有效签名，
+ * 没配时按旧流程上传（会打警告）。这样「忘了签名」不会悄悄发出去。
+ */
+const PUB_KEY = resolvePublicKey(ROOT, argv);
+function assertManifestSigned(manifest, label) {
+  if (PUB_KEY) {
+    const fp = fingerprint(PUB_KEY);
+    if (!manifest.keyId) {
+      throw new Error(`${label} 没有 keyId，说明这个包不是用当前公钥构建的；请先重新打包（客户端会没有内置公钥）`);
+    }
+    if (manifest.keyId !== fp) {
+      throw new Error(`${label} keyId ${manifest.keyId} 与当前公钥 ${fp} 不一致；请用同一把公钥重新打包`);
+    }
+  }
+  if (!manifest.signature) {
+    if (PUB_KEY) throw new Error(`${label} 没有 signature，拒绝上传；先跑 node tools/sign-manifest.js`);
+    console.log(`  [!!] ${label} 没有签名（项目根没有 update-pubkey.pem，按旧流程上传）`);
+    return;
+  }
+  const r = updateSign.verify(manifest, PUB_KEY);
+  if (!r.ok) throw new Error(`${label} 签名校验失败：${r.reason}`);
+  if (Array.isArray(manifest.deltas) && manifest.deltas.length) {
+    const d = updateSign.verifyDeltas(manifest, PUB_KEY);
+    if (!d.ok) throw new Error(`${label} 增量补丁签名校验失败：${d.reason}`);
+  }
+  console.log(`  [ok] ${label} 签名有效（公钥 ${fingerprint(PUB_KEY)}）`);
+}
 
 const TYPES = {
   '.json': 'application/json; charset=utf-8',
@@ -50,12 +90,14 @@ const TYPES = {
   '.zip': 'application/zip',
   '.js': 'application/javascript; charset=utf-8',
   '.txt': 'text/plain; charset=utf-8',
+  '.patch': 'application/octet-stream',
 };
 
 function loadConfig() {
   let file = {};
   let from = '';
-  for (const f of CFG_FILES) {
+  const files = [CONFIG_ARG, process.env.OSS_CONFIG || '', ...CFG_FILES].filter(Boolean);
+  for (const f of files) {
     if (!fs.existsSync(f)) continue;
     try {
       file = JSON.parse(fs.readFileSync(f, 'utf8'));
@@ -87,9 +129,10 @@ function loadConfig() {
   if (missing.length) {
     throw new Error(
       `缺少配置：${missing.join('、')}\n` +
-        `  办法一：在项目根建 oss.config.json：\n` +
+        `  办法一：把配置放到仓库外（推荐）：${HOME_CFG}\n` +
         `    { "bucket": "…", "region": "oss-cn-hangzhou", "akId": "LTAI…", "akSecret": "…" }\n` +
-        `  办法二：设环境变量 OSS_BUCKET / OSS_REGION / OSS_AK_ID / OSS_AK_SECRET`,
+        `  办法二：--config <文件> 或 OSS_CONFIG=<文件>\n` +
+        `  办法三：设环境变量 OSS_BUCKET / OSS_REGION / OSS_AK_ID / OSS_AK_SECRET`,
     );
   }
   return cfg;
@@ -191,6 +234,7 @@ async function main() {
   if (!fs.existsSync(manifestPath)) throw new Error('dist/latest.json 不存在，先跑一次 node build-exe.js');
   const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
   if (!manifest.url) throw new Error('latest.json 里没有 url 字段，请重新打包');
+  assertManifestSigned(manifest, 'latest.json');
 
   const assetName = String(manifest.url).split('/').pop();
   const assetPath = path.join(DIST, assetName);
@@ -208,6 +252,20 @@ async function main() {
     { key: PREFIX + assetName, body: buf, type: TYPES['.exe'] },
     { key: PREFIX + 'latest.json', body: fs.readFileSync(manifestPath), type: TYPES['.json'] },
   ];
+
+  // 增量补丁：体积小，跟着清单一起传；清单是最后传的，断网也不会出现「清单指了不存在的 patch」
+  for (const d of manifest.deltas || []) {
+    const name = path.basename(String(d.url || ''));
+    const file = path.join(DIST, name);
+    if (!name || !fs.existsSync(file)) throw new Error(`增量补丁缺失：${name || '(空 url)'}`);
+    const patchBuf = fs.readFileSync(file);
+    const patchSha = crypto.createHash('sha256').update(patchBuf).digest('hex');
+    if (patchBuf.length !== Number(d.size) || patchSha !== String(d.sha256 || '').toLowerCase()) {
+      throw new Error(`增量补丁与清单不符：${name}`);
+    }
+    jobs.push({ key: PREFIX + name, body: patchBuf, type: TYPES['.patch'] });
+    console.log(`  补丁   ${name}（${(patchBuf.length / 1024).toFixed(0)} KB）`);
+  }
   if (MANIFEST_ONLY) {
     // 只补清单：exe 上面已经校验过 sha256，确认线上下来的还是同一份就不用重传
     jobs.shift();
@@ -226,6 +284,7 @@ async function main() {
     if (String(mac.version) !== String(manifest.version)) {
       throw new Error(`mac 清单是 v${mac.version}，exe 是 v${manifest.version}，版本号不一致`);
     }
+    assertManifestSigned(mac, 'latest-mac.json');
     const macAssetName = String(mac.url || '').split('/').pop();
     const macAsset = path.join(MAC_DIST, macAssetName);
     if (!fs.existsSync(macAsset)) throw new Error(`mac 更新包 ${macAssetName} 不存在`);

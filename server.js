@@ -19,6 +19,7 @@ const fsp = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
 const crypto = require('node:crypto');
+const zlib = require('node:zlib');
 const { URL } = require('node:url');
 
 const { Sites, SITE_META } = require('./lib/adapters');
@@ -39,6 +40,7 @@ const SEED_CIPHER = require('./lib/seed');
 const LC = require('./lib/labelcache');
 const TAXO = require('./lib/taxonomy');
 const STATS = require('./lib/stats');
+const REGIONS = require('./lib/regions');
 const ASSETS = require('./lib/assets');
 // 自然在线（账号相册）—— 复用 nature-client 项目里那套模块，本文件只管路由和任务
 const NAT = require('./lib/nature-store');
@@ -49,6 +51,8 @@ const SCORE = require('./lib/score-store');
 const SCAI = require('./lib/score-ai');
 // 本地大模型运行库（llama-server）：内置 Windows CPU 包，第一次用时自己解压再拉起
 const LLAMA = require('./lib/llama');
+// 识别结果缓存（省站点额度、重复识别秒回）
+const IDC = require('./lib/identify-cache');
 // 合并中文名 → 大陆规范名（《中国生物物种名录》CoL China / 物种2000中国节点）。
 // 名录索引内置在程序里，按学名本地查表、覆盖识别站点回的中文名（台名/英名）；
 // 不联网、不要 API Key、不要 R，纯本地、不向外上报。
@@ -84,6 +88,10 @@ const THUMBS = path.join(CACHE, 'thumbs');
 // 浏览器把本机文件夹拖进来时，文件先落在这儿，再交给上传任务；跑完就删
 const NAT_DROP = path.join(CACHE, 'nature-drop');
 const CFG_FILE = path.join(DATA, 'config.json');
+// 本机日志：双击 exe 时控制台会一闪而过，崩溃/接口错误只能靠这个排查。
+// 只记版本、路径和异常，不记账号、令牌和请求体。
+const LOG_DIR = path.join(DATA, 'logs');
+const LOG_FILE = path.join(LOG_DIR, 'app.log');
 LC.init(path.join(CACHE, 'labels'));
 // 分类阶元（学名 → 界门纲目科属）缓存，查过就不再联网
 TAXO.init(path.join(CACHE, 'taxonomy'));
@@ -93,6 +101,7 @@ NAT.init({ dataDir: DATA, cacheDir: CACHE });
 SCORE.init({ dataDir: DATA, cacheDir: CACHE });
 // 本地大模型运行库：解压到 CACHE/llama-runtime/，pid 记在 data/llama.pid
 LLAMA.init({ cacheDir: CACHE });
+IDC.init({ dir: path.join(CACHE, 'identify') });
 try {
   fs.mkdirSync(THUMBS, { recursive: true });
 } catch {}
@@ -186,8 +195,10 @@ if (NAT.loggedOut()) {
    不参与相册，所以这里该清的还是清。
    升级上来的老用户，本机配置里残留的共用账号/令牌按 SHA-256 指纹清一次
    ——只留指纹不存原文，且打上标记只清一次，用户之后登录自己的账号不会再被清。 */
-const SEED_XINGSE_FP = {
-  user: 'a5564000ec86e69ccd928a109e15f5f5edbbae1f637ff16aa0d5feadb0b4e642',
+let configDirty = false;
+let persistTimer = null;
+
+const SEED_XINGSE_FP = {  user: 'a5564000ec86e69ccd928a109e15f5f5edbbae1f637ff16aa0d5feadb0b4e642',
   pass: '420aadc19d0d12c197d143fc3b34389ea1f0968d0b7dc2cb63e9c770cb9ad763',
   token: '4e05084e0d48d362c0e6c9ddb8f69daac36e6c1a13986c6e50ba6eedbed2e8c7',
 };
@@ -221,11 +232,17 @@ let sites = new Sites(config);
 COLCN.init();
 
 function persistConfig() {
+  if (persistTimer) {
+    clearTimeout(persistTimer);
+    persistTimer = null;
+  }
+  configDirty = true;
   fs.mkdirSync(DATA, { recursive: true });
   const payload = { port: config.port, sites: config.sites, sessions: config.sessions, ui: config.ui, deepseek: config.deepseek, seedXingsePurged: config.seedXingsePurged };
   const tmp = `${CFG_FILE}.tmp`;
   fs.writeFileSync(tmp, secure.seal(payload), 'utf8');
   fs.renameSync(tmp, CFG_FILE);
+  configDirty = false;
 }
 
 /**
@@ -233,18 +250,38 @@ function persistConfig() {
  * 顺手把 lastDir 记下来。全部立刻落盘的话，光是翻文件夹就要等半秒。
  * 折中：合并 1.2 秒后再写，翻得快时只写最后一次。
  */
-let persistTimer = null;
 function schedulePersist(delay = 1200) {
+  configDirty = true;
   if (persistTimer) clearTimeout(persistTimer);
   persistTimer = setTimeout(() => {
     persistTimer = null;
     try {
       persistConfig();
-    } catch {
-      /* 写不进去就算了，下次还会再试 */
+    } catch (err) {
+      // 写不进去下次还会再试，但至少留一条线索
+      logLine('warn', '配置落盘失败（稍后重试）：' + (err.stack || err.message));
     }
   }, delay);
   if (persistTimer.unref) persistTimer.unref();
+}
+
+/**
+ * 退出前把攒着没写的配置立刻落盘。
+ * 关闭窗口的时间点常常落在 1.2 秒的合并窗口里，不 flush 的话最后一次改的偏好会丢。
+ */
+function flushConfig() {
+  if (persistTimer) {
+    clearTimeout(persistTimer);
+    persistTimer = null;
+  }
+  if (!configDirty) return false;
+  try {
+    persistConfig();
+    return true;
+  } catch (err) {
+    logLine('error', '退出前配置落盘失败：' + (err.stack || err.message));
+    return false;
+  }
 }
 
 /**
@@ -372,6 +409,56 @@ function sendJson(res, code, obj, after) {
   if (typeof after === 'function') res.once('finish', () => setImmediate(after));
 }
 
+/* ---------------- 日志 ---------------- */
+
+const LOG_MAX_BYTES = 2 * 1024 * 1024;
+let logBytes = -1;
+
+/**
+ * 追加一行日志到 data/logs/app.log。
+ *
+ * 同步写：崩溃/退出路径上也能落盘；失败就静默 —— 日志本身绝不能拖垮程序。
+ * 超过 2 MB 轮转成 app.log.1（只留一代，桌面工具不需要长期归档）。
+ */
+function logLine(level, msg) {
+  try {
+    const line = `[${new Date().toISOString()}] [${level}] ${String(msg == null ? '' : msg)}\n`;
+    fs.mkdirSync(LOG_DIR, { recursive: true });
+    if (logBytes < 0) {
+      try { logBytes = fs.statSync(LOG_FILE).size; } catch { logBytes = 0; }
+    }
+    const bytes = Buffer.byteLength(line);
+    if (logBytes + bytes > LOG_MAX_BYTES) {
+      try { fs.rmSync(`${LOG_FILE}.1`, { force: true }); } catch {}
+      try { fs.renameSync(LOG_FILE, `${LOG_FILE}.1`); } catch {}
+      logBytes = 0;
+    }
+    fs.appendFileSync(LOG_FILE, line, 'utf8');
+    logBytes += bytes;
+  } catch {
+    /* 只读盘 / 权限不足：日志写不进去不影响主流程 */
+  }
+}
+
+/**
+ * 本机 API 的同源校验。
+ *
+ * 只监听 127.0.0.1 挡不住 CSRF：任意网页都能让浏览器向本机发 POST。
+ * 现代浏览器会带 Sec-Fetch-Site / Origin，这里只要发现是跨站就直接拒绝；
+ * curl、更新探活这类非浏览器请求没有这两个头，照常放行。
+ */
+function isSameOrigin(req) {
+  const site = String(req.headers['sec-fetch-site'] || '').toLowerCase();
+  if (site && site !== 'same-origin' && site !== 'none') return false;
+  const origin = String(req.headers.origin || '');
+  if (!origin) return true;
+  try {
+    return new URL(origin).host.toLowerCase() === String(req.headers.host || '').toLowerCase();
+  } catch {
+    return false;
+  }
+}
+
 function readBody(req, limit = 40 * 1024 * 1024) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -404,7 +491,15 @@ function bad(msg, status = 400) {
 /** 目录安全：必须是存在的绝对路径，且是文件夹 */
 function asDir(p) {
   if (!p) throw bad('缺少路径');
-  const full = path.resolve(String(p));
+  const raw = String(p);
+  let full = path.resolve(raw);
+  // 兼容旧前端：早期 mac 版把 /Users/… 写成 \Users\…（前端无条件把 / 换成 \），
+  // 在 POSIX 上反斜杠只是普通字符，整棵文件夹树会全部打不开。这里救一次，
+  // 让没重新打包的老 .app 也能恢复；Windows 上绝不做这个转换。
+  if (!fs.existsSync(full) && process.platform !== 'win32' && raw.includes('\\')) {
+    const fixed = raw.replace(/\\/g, '/');
+    if (fs.existsSync(fixed)) full = path.resolve(fixed);
+  }
   if (!fs.existsSync(full)) throw bad(`文件夹不存在：${full}`);
   if (!fs.statSync(full).isDirectory()) throw bad(`这不是文件夹：${full}`);
   return full;
@@ -1147,6 +1242,7 @@ async function apiIdentify(body) {
     small: body.dataSmall ? Buffer.from(body.dataSmall, 'base64') : null,
     jpeg: body.dataJpeg ? Buffer.from(body.dataJpeg, 'base64') : null,
     sources: body.sources,
+    force: body.force === true,
   });
   return { ...out, file, name: path.basename(file) };
 }
@@ -1166,12 +1262,13 @@ async function apiIdentifyRemote(body) {
     small: body.dataSmall ? Buffer.from(body.dataSmall, 'base64') : null,
     jpeg: body.dataJpeg ? Buffer.from(body.dataJpeg, 'base64') : null,
     sources: body.sources,
+    force: body.force === true,
   });
   return { ...out, url, name: body.name || '' };
 }
 
 /** 真正的识别：本地文件和站点照片共用这一段 */
-async function identifyImage({ buffer, mime, filename, small, jpeg, sources }) {
+async function identifyImage({ buffer, mime, filename, small, jpeg, sources, force }) {
   const img = {
     buffer,
     mime,
@@ -1195,6 +1292,13 @@ async function identifyImage({ buffer, mime, filename, small, jpeg, sources }) {
     });
   if (!keys.length) throw bad('没有可用的识别站点，请先选一个方案或填好账号');
 
+  const started = Date.now();
+  const cacheKey = IDC.keyFor(img, keys, COLCN.stat().version);
+  if (!force) {
+    const hit = IDC.read(cacheKey);
+    if (hit) return { ...hit, cached: true, ms: Date.now() - started };
+  }
+
   // 需要账号的站点：没登录过就先登一次（多识在 identify 内部自己处理）
   await Promise.all(
     keys
@@ -1213,7 +1317,6 @@ async function identifyImage({ buffer, mime, filename, small, jpeg, sources }) {
     return { key: k, mirrorOf: '' };
   });
 
-  const started = Date.now();
   const results = {};
   const list = await Promise.all(
     plan
@@ -1265,7 +1368,7 @@ async function identifyImage({ buffer, mime, filename, small, jpeg, sources }) {
       mirrorOf: r.mirrorOf || '',
     };
   }
-  return {
+  const out = {
     ok: true,
     ms: Date.now() - started,
     // sites = 每站明细（原站点 key → {ok, items, error, ms, mirrorOf}）
@@ -1288,6 +1391,14 @@ async function identifyImage({ buffer, mime, filename, small, jpeg, sources }) {
     verdict: agg.verdict,
     genusConsensus: agg.genusConsensus,
   };
+
+  // 有站点给出结果才缓存；全失败说明是网络/账号问题，留给下次重试。
+  // 有站点失败的结果只留 7 天，免得一次抖动把缺站的结果锁一个月。
+  if (out.siteCount > 0) {
+    const allOk = Object.values(out.sites).every((s) => s.ok);
+    IDC.write(cacheKey, out, allOk ? IDC.TTL : IDC.PARTIAL_TTL);
+  }
+  return out;
 }
 
 async function apiWrite(body) {
@@ -1495,6 +1606,136 @@ function nameFieldsFromFile(name) {
   // 中文名：去掉括号拉丁段后剩下的连续中文
   const cnMatch = base.replace(PAREN_GROUP_RE, ' ').match(/[\u4e00-\u9fa5·]{2,}/);
   return { cn: cnMatch ? cnMatch[0] : '', latin };
+}
+
+/** 只要文件名里的中文名（不管有没有学名）。纯中文名的照片靠它进入「物种名核对」。 */
+// 调查批次、相机默认名里的中文不是物种名，别拿去反查学名制造一堆噪声
+const GENERIC_CN_RE = /调查|照片|样地|样方|采集|记录|第|图片|图库|未命名|批次|截图/;
+function cnFromFile(name) {
+  const base = String(name || '').replace(/\.[^.]+$/, '').replace(/[（(][^（()）]*[)）]/g, ' ');
+  const m = base.match(/[\u4e00-\u9fa5·]{2,}/);
+  return m && !GENERIC_CN_RE.test(m[0]) ? m[0] : '';
+}
+
+/* ---------------- 物种名核对：把只有中文名 / 只有学名的补齐 ----------------
+ * 这里**只算建议，不写任何文件**：写回由界面确认后统一走 /api/write（本机端）
+ * 或 /api/nat/renames（相册端，先存本机待上传鉴定）。
+ * 内置名录离线可查 14.8 万条；查不到且勾选「联网补查」时才去自然在线分类库，
+ * 且最多 40 次、每次 3.5 秒超时，断网/没登录一律静默跳过。
+ */
+async function siteTaxaPick(keyword, side) {
+  const kw = String(keyword || '').trim();
+  if (!kw) return null;
+  let timer = 0;
+  try {
+    const X = NAT.client();
+    const raw = await Promise.race([
+      X.searchTaxa(kw, 10),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('超时')), 3500); }),
+    ]);
+    const list = Array.isArray(raw) ? raw : [];
+    const pick = (fn) => {
+      const t = list.find(fn);
+      return t ? { nameZh: String(t.nameZh || '').trim(), spName: String(t.spName || '').trim() } : null;
+    };
+    if (side === 'latin') {
+      const key = COLCN.normLatin(kw);
+      return pick((t) => COLCN.normLatin(t.spName) === key)
+        || (key.length >= 6 ? pick((t) => COLCN.normLatin(t.spName).startsWith(key)) : null);
+    }
+    return pick((t) => String(t.nameZh || '').trim() === kw)
+      || (kw.length >= 3 ? pick((t) => String(t.nameZh || '').trim().includes(kw)) : null);
+  } catch {
+    return null;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function apiSpeciesComplete(body) {
+  COLCN.init();
+  const list = Array.isArray(body.items) ? body.items.slice(0, 600) : [];
+  const online = body.online === true;
+  const cache = new Map();
+  let onlineTried = 0;
+  const out = [];
+  for (const it of list) {
+    const key = String((it && it.key) || '');
+    const fileName = String((it && it.fileName) || (it && it.name) || '').slice(0, 300);
+    const fromLabel = splitNameFields({
+      title: String((it && it.labelTitle) || ''),
+      keywords: Array.isArray(it && it.labelKeywords) ? it.labelKeywords : [],
+    });
+    const fromFile = nameFieldsFromFile(fileName);
+    const bareCn = cnFromFile(fileName);
+    let cn = String((it && it.cn) || '').trim() || fromLabel.cn || '';
+    let latin = String((it && it.latin) || '').trim() || fromLabel.latin || '';
+    if (!latin) latin = fromFile.latin || '';
+    if (!cn) {
+      // 已经有学名时，只认「中文名(学名)」这种成对写法；没有学名才允许纯中文文件名
+      cn = fromFile.latin || !latin ? fromFile.cn || bareCn : '';
+    }
+    cn = cn.replace(/\s+/g, ' ').trim().slice(0, 120);
+    latin = latin.replace(/\s+/g, ' ').trim().slice(0, 160);
+    const row = {
+      key, fileName, cn, latin, fillCn: cn, fillLatin: latin,
+      state: '', source: '', candidates: [], note: '',
+    };
+    if (!cn && !latin) {
+      row.state = 'empty';
+      row.note = '没有物种名，先识别或双击卡片名称手填';
+      out.push(row);
+      continue;
+    }
+    if (cn && latin) {
+      row.state = 'complete';
+      const std = COLCN.lookup(latin);
+      // 两侧都齐：只提示名录规范名，不擅自覆盖用户写好的中文名
+      if (std && std !== cn) row.note = `名录里 ${latin} 写作「${std}」，可顺手核对`;
+      out.push(row);
+      continue;
+    }
+    const ck = latin ? `la:${latin.toLowerCase()}` : `cn:${cn}`;
+    let got = cache.get(ck);
+    if (!got) {
+      if (latin) {
+        const std = COLCN.lookup(latin);
+        if (std) got = { state: 'filled', fillCn: std, source: '中国生物物种名录' };
+        if (!got && online && onlineTried < 40) {
+          onlineTried += 1;
+          const hit = await siteTaxaPick(latin, 'latin');
+          if (hit && hit.nameZh) got = { state: 'filled', fillCn: hit.nameZh, source: '自然在线分类库' };
+        }
+      } else {
+        const r = COLCN.lookupLatin(cn);
+        if (r.latin) got = { state: 'filled', fillLatin: r.latin, source: '中国生物物种名录' };
+        else if (r.ambiguous) {
+          got = { state: 'ambiguous', candidates: r.candidates, note: '名录里多个学名共用这个中文名，请挑一个' };
+        } else if (online && onlineTried < 40) {
+          onlineTried += 1;
+          const hit = await siteTaxaPick(cn, 'cn');
+          if (hit && hit.spName) got = { state: 'filled', fillLatin: hit.spName, source: '自然在线分类库' };
+        }
+      }
+      got = got || {
+        state: 'unresolved',
+        note: latin ? '内置名录没有收录这个学名' : '内置名录里没有这个中文名',
+      };
+      cache.set(ck, got);
+    }
+    row.fillCn = got.fillCn || cn;
+    row.fillLatin = got.fillLatin || latin;
+    row.state = got.state;
+    row.source = got.source || '';
+    row.candidates = got.candidates || [];
+    row.note = got.note || '';
+    out.push(row);
+  }
+  const summary = { total: out.length };
+  for (const s of ['filled', 'ambiguous', 'unresolved', 'complete', 'empty']) {
+    summary[s] = out.filter((x) => x.state === s).length;
+  }
+  return { ok: true, items: out, summary, dict: COLCN.stat(), online, onlineTried };
 }
 
 /**
@@ -1989,6 +2230,81 @@ function walkImageFilesShallow(dir) {
 
 const NAT_JOBS = new Map();
 
+/* ---------------- 纯 Node 的 ZIP 打包（store，无压缩，零依赖） ----------------
+ * 「下载原图」用：站点只给一张张原图地址，本机逐张取回后自己打成一个 zip，
+ * 不引入第三方库（单文件 exe 也要能跑）。和 nature-client 里同一套实现。 */
+
+let _zipCrcTable = null;
+function zipCrc32(buf) {
+  if (!_zipCrcTable) {
+    _zipCrcTable = new Uint32Array(256);
+    for (let n = 0; n < 256; n += 1) {
+      let c = n;
+      for (let k = 0; k < 8; k += 1) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+      _zipCrcTable[n] = c >>> 0;
+    }
+  }
+  let crc = 0xffffffff;
+  for (let i = 0; i < buf.length; i += 1) crc = _zipCrcTable[(crc ^ buf[i]) & 0xff] ^ (crc >>> 8);
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function zipStore(files) {
+  const chunks = [];
+  const central = [];
+  let offset = 0;
+  for (const f of files) {
+    const nameBuf = Buffer.from(String(f.name || 'file'), 'utf8');
+    const data = f.data;
+    const crc = zipCrc32(data);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(0x0800, 6);   // UTF-8 文件名
+    local.writeUInt16LE(0, 8);        // store
+    local.writeUInt16LE(0, 10);
+    local.writeUInt16LE(0, 12);
+    local.writeUInt32LE(crc, 14);
+    local.writeUInt32LE(data.length, 18);
+    local.writeUInt32LE(data.length, 22);
+    local.writeUInt16LE(nameBuf.length, 26);
+    local.writeUInt16LE(0, 28);
+    chunks.push(local, nameBuf, data);
+
+    const cen = Buffer.alloc(46);
+    cen.writeUInt32LE(0x02014b50, 0);
+    cen.writeUInt16LE(20, 4);
+    cen.writeUInt16LE(20, 6);
+    cen.writeUInt16LE(0x0800, 8);
+    cen.writeUInt16LE(0, 10);
+    cen.writeUInt16LE(0, 12);
+    cen.writeUInt16LE(0, 14);
+    cen.writeUInt32LE(crc, 16);
+    cen.writeUInt32LE(data.length, 20);
+    cen.writeUInt32LE(data.length, 24);
+    cen.writeUInt16LE(nameBuf.length, 28);
+    cen.writeUInt16LE(0, 30);
+    cen.writeUInt16LE(0, 32);
+    cen.writeUInt16LE(0, 34);
+    cen.writeUInt16LE(0, 36);
+    cen.writeUInt32LE(0, 38);
+    cen.writeUInt32LE(offset, 42);
+    central.push(cen, nameBuf);
+    offset += local.length + nameBuf.length + data.length;
+  }
+  const centralBuf = Buffer.concat(central);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(0, 4);
+  end.writeUInt16LE(0, 6);
+  end.writeUInt16LE(files.length, 8);
+  end.writeUInt16LE(files.length, 10);
+  end.writeUInt32LE(centralBuf.length, 12);
+  end.writeUInt32LE(offset, 16);
+  end.writeUInt16LE(0, 20);
+  return Buffer.concat([...chunks, centralBuf, end]);
+}
+
 /** 图片代理：带 referer + Bearer 取回来，落盘缓存（同一个 URL 只联一次网） */
 async function serveNatureImage(req, res, q) {
   const u = String(q.get('u') || '');
@@ -2139,6 +2455,41 @@ function getNatUpload(id) {
 
 async function handleNature(req, res, pathname, q) {
   const X = NAT.client();
+
+  /* 本机待上传的鉴定结果（逐张命名记录）。
+   * 只存「照片 id + 中文名/学名 + 状态」，不存图片、不上传图片。
+   * 标注页相册端选好候选点「写入鉴定」先落到这里；用户再点「重新鉴定上传」
+   * 才由 /api/nat/reidentify 把纯 JSON 提交给站点，成功后回写状态并重新拉照片。 */
+  if (pathname === '/api/nat/renames' && req.method === 'GET') {
+    return sendJson(res, 200, { ok: true, records: NAT.readRenames() });
+  }
+  if (pathname === '/api/nat/renames' && req.method === 'POST') {
+    const b = await readJson(req);
+    const incoming = Array.isArray(b.records) ? b.records : [];
+    const map = new Map(NAT.readRenames().map((r) => [String(r.photoId), r]));
+    for (const r of incoming) {
+      if (!r || !r.photoId) continue;
+      const id = String(r.photoId);
+      const old = map.get(id) || {};
+      map.set(id, {
+        ...old,
+        ...r,
+        photoId: id,
+        status: String(r.status || old.status || 'pending'),
+        savedAt: Number(r.savedAt) || Date.now(),
+      });
+    }
+    const out = [...map.values()];
+    NAT.writeRenames(out);
+    return sendJson(res, 200, { ok: true, records: out });
+  }
+  if (pathname === '/api/nat/renames/delete' && req.method === 'POST') {
+    const b = await readJson(req);
+    const ids = new Set((Array.isArray(b.ids) ? b.ids : []).map(String));
+    const out = NAT.readRenames().filter((r) => !ids.has(String(r.photoId)));
+    NAT.writeRenames(out);
+    return sendJson(res, 200, { ok: true, records: out });
+  }
 
   /* 状态：顺带验一下令牌还有没有效 */
   if (pathname === '/api/nat/status' && req.method === 'GET') {
@@ -2323,6 +2674,54 @@ async function handleNature(req, res, pathname, q) {
     return;
   }
 
+  /* 下载真·原图：勾选（或本页）照片的原始文件逐张取回，本机打成 zip。
+   * 和上面的「站点打包下载」不是一回事：这里拿到的是原图字节，不经站点压缩/改名。 */
+  if (pathname === '/api/nat/original-zip' && req.method === 'POST') {
+    const b = await readJson(req);
+    const items = Array.isArray(b.items) ? b.items : [];
+    if (!items.length) throw bad('没有要下载的图片');
+    const out = [];
+    for (const it of items) {
+      const u = String((it && it.url) || '');
+      // 只允许本站地址，别把本地服务当成任意 URL 的代理
+      if (!u.startsWith(NAT.SITE_BASE + '/')) continue;
+      const rawName = String((it && it.name) || ('photo_' + (out.length + 1)));
+      const name = rawName.replace(/[\\/:*?"<>|]/g, '_').slice(0, 120) || ('photo_' + (out.length + 1));
+      try {
+        const { buffer: data } = await NAT.fetchImage(u);
+        if (data && data.length) out.push({ name, data });
+      } catch {
+        /* 单张取不到不中断，最后提示缺了几张 */
+      }
+    }
+    if (!out.length) throw bad('没有取到任何原图（地址可能已失效或需要重新登录）');
+    const zip = zipStore(out);
+    const stamp = new Date().toISOString().slice(0, 10);
+    res.writeHead(200, {
+      'content-type': 'application/zip',
+      'content-length': zip.length,
+      'content-disposition': `attachment; filename="nature-originals-${stamp}.zip"`,
+      'cache-control': 'no-store',
+    });
+    return res.end(zip);
+  }
+
+  /* 清除本机缓存的自然在线图片（CACHE/nature-img）和拖入上传的临时文件。
+   * 只删可重建的字节：账号令牌、待上传鉴定记录、评分结果一律不动。 */
+  if (pathname === '/api/nat/cache/clear' && req.method === 'POST') {
+    let files = 0;
+    let bytes = 0;
+    const dir = path.join(CACHE, 'nature-img');
+    try {
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        try { bytes += fs.statSync(path.join(dir, e.name)).size; files += 1; } catch { /* ignore */ }
+      }
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch { /* 目录还不存在 */ }
+    try { fs.rmSync(NAT_DROP, { recursive: true, force: true }); } catch { /* ignore */ }
+    return sendJson(res, 200, { ok: true, files, bytes });
+  }
+
   throw bad('未知接口：' + pathname, 404);
 }
 
@@ -2353,6 +2752,37 @@ async function apiNatDropFile(req, q) {
 
 /* ---------------- 静态资源 ---------------- */
 
+// 只允许同源脚本/样式；图片额外允许 data: 与 blob:（粘贴预览、大图查看用）。
+// 页面里没有内联 <script>，所以 script-src 不需要 'unsafe-inline'。
+const CSP =
+  "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; " +
+  "script-src 'self'; worker-src 'self' blob:; connect-src 'self'; font-src 'self'; " +
+  "base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'";
+
+const STATIC_GZ = new Map(); // 内容 sha1 → gzip Buffer，最多留 24 份
+const TEXTUAL = /^(?:text\/|application\/(?:javascript|json)|image\/svg\+xml)/i;
+
+function gzipCached(buf) {
+  const key = crypto.createHash('sha1').update(buf).digest('hex');
+  let gz = STATIC_GZ.get(key);
+  if (!gz) {
+    gz = zlib.gzipSync(buf, { level: 9 });
+    if (STATIC_GZ.size >= 24) STATIC_GZ.delete(STATIC_GZ.keys().next().value);
+    STATIC_GZ.set(key, gz);
+  }
+  return { key, gz };
+}
+
+/** If-None-Match 可能是一串、带 W/ 前缀，也可能直接是 * */
+function etagMatched(req, etag) {
+  const raw = String(req.headers['if-none-match'] || '');
+  if (!raw) return false;
+  return raw.split(',').some((part) => {
+    const v = part.trim();
+    return v === '*' || v === etag || v === `W/${etag}`;
+  });
+}
+
 function serveStatic(req, res, pathname) {
   let rel = pathname;
   try {
@@ -2368,13 +2798,46 @@ function serveStatic(req, res, pathname) {
     res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' }).end('not found');
     return;
   }
-  const buf = hit.body;
-  res.writeHead(200, {
-    'content-type': hit.mime || MIME[path.extname(rel).toLowerCase()] || 'application/octet-stream',
-    'content-length': buf.length,
+  const raw = hit.body;
+  const mime = hit.mime || MIME[path.extname(rel).toLowerCase()] || 'application/octet-stream';
+  const textual = TEXTUAL.test(mime);
+
+  // 文本资源先 gzip 再发（首屏 app.js 325 KB → 约 106 KB）；图片已经是压缩格式，不动。
+  // 缓存键是内容 sha1：源码模式下改了文件会立刻换新键，不会拿到上一次的旧压缩结果。
+  let key;
+  let gz = null;
+  if (textual) ({ key, gz } = gzipCached(raw));
+  else key = crypto.createHash('sha1').update(raw).digest('hex');
+  const acceptsGzip = textual && /\bgzip\b/i.test(String(req.headers['accept-encoding'] || ''));
+  const useGzip = Boolean(gz) && acceptsGzip && gz.length < raw.length;
+  const body = useGzip ? gz : raw;
+  const etag = `"${key}${useGzip ? '-gz' : ''}"`;
+
+  const headers = {
+    'content-type': mime,
     'cache-control': 'no-cache',
-  });
-  res.end(buf);
+    etag,
+    vary: 'Accept-Encoding',
+    'x-content-type-options': 'nosniff',
+    'referrer-policy': 'no-referrer',
+  };
+  if (useGzip) headers['content-encoding'] = 'gzip';
+  if (/^text\/html/i.test(mime)) {
+    headers['content-security-policy'] = CSP;
+    headers['x-frame-options'] = 'DENY';
+  }
+
+  // 浏览器再次打开同一版页面只回 304，不重传几百 KB
+  if (etagMatched(req, etag)) {
+    res.writeHead(304, headers);
+    res.end();
+    return;
+  }
+
+  headers['content-length'] = body.length;
+  res.writeHead(200, headers);
+  if (req.method === 'HEAD') res.end();
+  else res.end(body);
 }
 
 function serveImage(req, res, q) {
@@ -2515,26 +2978,27 @@ function apiState() {
  * 递归扫一个文件夹及其所有子文件夹，把每张「已标注 / 未标注」图喂给 lib/stats.js。
  */
 
-const geoCache = new Map();
-async function reverseRegion(lat, lon) {
-  const key = `${lat.toFixed(2)},${lon.toFixed(2)}`;
-  if (geoCache.has(key)) return geoCache.get(key);
-  let label = null;
-  try {
-    const url = `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lon}&localityLanguage=zh`;
-    const res = await fetch(url, { signal: AbortSignal.timeout(6000) });
-    if (res.ok) {
-      const j = await res.json();
-      const parts = [j.principalSubdivision, j.city || j.locality].filter(Boolean);
-      if (parts.length) label = parts.join('·');
-    }
-  } catch {
-    label = null;
-  }
-  geoCache.set(key, label);
-  return label;
+/** 把数组按并发上限跑一遍，结果保持原顺序。统计页几千张图靠它把串行 IO 摊开。 */
+async function mapLimit(list, limit, fn) {
+  const arr = Array.from(list);
+  const out = new Array(arr.length);
+  let next = 0;
+  const workers = Math.max(1, Math.min(Number(limit) || 1, arr.length || 1));
+  await Promise.all(
+    Array.from({ length: workers }, async () => {
+      for (;;) {
+        const i = next++;
+        if (i >= arr.length) return;
+        out[i] = await fn(arr[i], i);
+      }
+    }),
+  );
+  return out;
 }
 
+// 行政区划改为离线索引（lib/regions.js + public/regions.bin）：
+// 统计页不再联网反查 GPS，不会把坐标发给第三方；离最近城市超过 80 km 时
+// 返回空，回落到文件夹名，避免把边远地区标到相邻省份。
 async function walkStats(dir, root, out) {
   if (out.length >= MAX_STAT_FILES) return;
   let ents;
@@ -2567,12 +3031,13 @@ async function analyzeStats(dir) {
   const files = [];
   await walkStats(root, root, files);
 
-  // 1) 读标签 + EXIF（异步批量，USB 机械盘上比同步快很多）
-  const items = [];
-  for (const f of files) {
+  // 1) 并发读标签 + EXIF：同一次读头把 XMP 和拍摄时间/GPS 一起拿回来。
+  //    以前是串行 await，5000 张能拖到几十分钟；这里 8 路并发，且不再为 EXIF 二次开文件。
+  const STAT_CONC = 8;
+  const items = await mapLimit(files, STAT_CONC, async (f) => {
     let label = null;
     try {
-      label = await IMG.readLabelFastAsync(f.full);
+      label = await IMG.readLabelFastAsync(f.full, { withMeta: true });
     } catch {}
     let { cn, latin } = splitNameFields(label || {});
     // 没写标签的图，名字往往就在文件名上（验收照片十有八九如此）。
@@ -2582,7 +3047,8 @@ async function analyzeStats(dir) {
       cn = nf.cn;
       latin = nf.latin;
     }
-    const ex = EX.meta(f.full);
+    // 统计只用到时间/坐标；缩略图丢掉，5000 张能省几十 MB
+    const ex = label && label.meta ? { ...label.meta, thumb: null } : { ...EX.EMPTY };
     let taken = null;
     if (ex.dateTime) {
       const d = new Date(String(ex.dateTime).replace(' ', 'T'));
@@ -2596,13 +3062,14 @@ async function analyzeStats(dir) {
         taken = null;
       }
     }
-    items.push({ f, cn, latin, ex, taken });
-  }
+    return { f, cn, latin, ex, taken };
+  });
 
   // 2) 批量解析分类（复用标注工坊真实的分类缓存 + iNat/GBIF）
   const taxoMap = await TAXO.resolve(items.map((it) => ({ latin: it.latin, cn: it.cn })));
 
-  // 3) 组装 records
+  // 3) 组装 records。GPS 用本地索引查省/市，不再联网；
+  //    TAGDEN_NO_GEOCODE=1 时连本地标签也不用，只保留文件夹名。
   const records = [];
   for (const it of items) {
     const key = it.latin ? it.latin.toLowerCase() : `cn:${it.cn.toLowerCase()}`;
@@ -2610,8 +3077,8 @@ async function analyzeStats(dir) {
     const rk = (r) => (rec.ranks && rec.ranks[r]) || {};
     const labeled = !!(it.cn || it.latin);
     let region = it.f.top || '根目录';
-    if (it.ex && it.ex.lat != null && it.ex.lon != null) {
-      const g = await reverseRegion(it.ex.lat, it.ex.lon);
+    if (it.ex && it.ex.lat != null && it.ex.lon != null && process.env.TAGDEN_NO_GEOCODE !== '1') {
+      const g = REGIONS.labelFor(it.ex.lat, it.ex.lon);
       if (g) region = g;
     }
     records.push({
@@ -2858,6 +3325,12 @@ async function handleScore(req, res, pathname, q) {
     SCORE.remotePut(key, { rec: b.rec || {}, name: String(b.name || ''), source: String(b.source || '') });
     return sendJson(res, 200, { ok: true });
   }
+  // 评分页相册端「清除评分」：只清所选 photoId 的评分记录，站点照片和本机目录评分都不动
+  if (pathname === '/api/score/remote/clear' && req.method === 'POST') {
+    const b = await readJson(req);
+    const keys = Array.isArray(b.keys) ? b.keys.map(String).slice(0, 5000) : [];
+    return sendJson(res, 200, { ok: true, cleared: SCORE.remoteClear(keys) });
+  }
   return sendJson(res, 404, { ok: false, error: '未知的照片评分接口' });
 }
 
@@ -2945,6 +3418,7 @@ async function handleApi(req, res, pathname, q) {
       small,
       jpeg,
       sources: body.sources,
+      force: body.force === true,
     });
     return sendJson(res, 200, { ...out, name, pasted: true });
   }
@@ -3333,6 +3807,11 @@ async function handleApi(req, res, pathname, q) {
     }
   }
 
+  // 物种名核对：只回补齐建议，不写文件、不改名字；写回由界面确认后自行提交。
+  if (pathname === '/api/species/complete' && req.method === 'POST') {
+    return sendJson(res, 200, await apiSpeciesComplete(await readJson(req)));
+  }
+
   // 内置大陆中文名录自检：拿一个学名查一下内置索引，确认名录随程序带上了。
   // 只读、不联网、不改动任何状态。
   if (pathname === '/api/colcn/test' && req.method === 'POST') {
@@ -3403,6 +3882,9 @@ async function handleApi(req, res, pathname, q) {
 const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, `http://${req.headers.host || '127.0.0.1'}`);
   const pathname = u.pathname;
+  // 所有响应都带的基础安全头；CSP 只加在 HTML 上（见 serveStatic）
+  res.setHeader('x-content-type-options', 'nosniff');
+  res.setHeader('referrer-policy', 'no-referrer');
   try {
     // 只服务本机：挡掉 DNS rebinding 之类的跨站访问
     const host = String(req.headers.host || '');
@@ -3410,12 +3892,34 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' }).end('只允许本机访问');
       return;
     }
+    // 跨站网页不许借浏览器调本机 API / 读本机图片。
+    // 非浏览器客户端（curl、更新探活）没有 Origin / Sec-Fetch-Site，照常放行。
+    if ((pathname.startsWith('/api/') || pathname === '/img') && !isSameOrigin(req)) {
+      if (pathname.startsWith('/api/')) sendJson(res, 403, { ok: false, error: '跨站请求已拒绝' });
+      else res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' }).end('跨站请求已拒绝');
+      return;
+    }
+    // 带 body 的 POST 必须是 JSON：跨站表单/简单请求过不了这一关（拖文件的原始字节接口例外）。
+    if (pathname.startsWith('/api/') && req.method === 'POST' && pathname !== '/api/nat/drop-file') {
+      const len = Number(req.headers['content-length'] || 0);
+      if (len > 0) {
+        const ct = String(req.headers['content-type'] || '').toLowerCase();
+        if (!ct.startsWith('application/json')) {
+          sendJson(res, 415, { ok: false, error: '请求体必须是 application/json' });
+          return;
+        }
+      }
+    }
     if (pathname.startsWith('/api/')) return await handleApi(req, res, pathname, u.searchParams);
     if (pathname === '/img') return serveImage(req, res, u.searchParams);
     return serveStatic(req, res, pathname);
   } catch (err) {
+    const code = err.status || 500;
+    // 4xx 是用户输入问题，只记一行；5xx 连堆栈一起记，方便用户把日志发回来
+    const detail = code >= 500 ? (err.stack || err.message) : (err.message || String(err));
+    logLine(code >= 500 ? 'error' : 'warn', `${req.method} ${pathname} -> ${code} ${detail}`);
     // payload 是给前端做后续动作用的（比如「聚合台没装」时附上下载直链），不覆盖 ok/error
-    if (!res.headersSent) sendJson(res, err.status || 500, { ok: false, error: err.message || '服务器内部错误', ...(err.payload || {}) });
+    if (!res.headersSent) sendJson(res, code, { ok: false, error: err.message || '服务器内部错误', ...(err.payload || {}) });
     else res.end();
   }
 });
@@ -3470,6 +3974,7 @@ server.on('error', async (err) => {
     const who = await identifyOccupant(port);
     console.log('');
     if (who && who.id === 'tagden') {
+      logLine('info', `端口 ${port} 已有本程序在运行（v${who.version || '?'}），打开浏览器后退出`);
       console.log(`  端口 ${port} 上已经开着一个标注工坊${who.version ? `（v${who.version}）` : ''}，直接给你打开浏览器。`);
       console.log('  如果那个窗口是旧的、想换成现在这个，先把它关掉再启动。');
       if (!process.env.TAGDEN_NO_BROWSER) openBrowser(`http://127.0.0.1:${port}`);
@@ -3477,9 +3982,11 @@ server.on('error', async (err) => {
       return;
     }
     if (who) {
+      logLine('warn', `端口 ${port} 被「${who.name}」占用`);
       console.log(`  ⚠ 端口 ${port} 被「${who.name}」占着 —— 两个软件不能用同一个端口。`);
       console.log('    请先关掉那个软件的窗口，再重新双击本程序。');
     } else {
+      logLine('warn', `端口 ${port} 被未知程序占用`);
       console.log(`  ⚠ 端口 ${port} 被别的程序占用了（不是本程序）。`);
       console.log('    关掉占用的程序再启动，或用  --port 7802  换个端口。');
     }
@@ -3487,6 +3994,7 @@ server.on('error', async (err) => {
     setTimeout(() => process.exit(1), 1500);
     return;
   }
+  logLine('fatal', '启动失败：' + (err.stack || err.message));
   console.error('');
   console.error('  启动失败：' + err.message);
   console.error('');
@@ -3501,21 +4009,29 @@ server.listen(port, '127.0.0.1', () => {
   console.log(`  配置目录     ${DATA}`);
   if (DATA_NOTE) console.log(`               （${DATA_NOTE}）`);
   console.log(`  缓存目录     ${CACHE}`);
+  console.log(`  日志文件     ${LOG_FILE}`);
   console.log('');
   console.log('  Ctrl+C 退出（关掉这个黑窗口也会退出）');
   console.log('');
+  logLine('info', `启动 v${VERSION} · ${process.platform}/${process.arch} · ${isSea ? 'exe' : isAppBundle ? 'bundle' : 'source'} · data=${DATA} · cache=${CACHE}`);
 
-  // 需要账号的两个站点静默登录一次，省得第一次识别才现登
-  (async () => {
-    for (const key of ['inaturalist', 'duoshi']) {
-      try {
-        await sites.login(key);
-        console.log(`  [ok] ${SITE_META[key].name} 已登录`);
-      } catch (err) {
-        console.log(`  [!!] ${SITE_META[key].name} 登录失败：${err.message}`);
+  // 需要账号的两个站点静默登录一次，省得第一次识别才现登。
+  // 自动化测试 / 离线环境用 TAGDEN_NO_LOGIN=1 跳过，避免启动时打外网。
+  if (process.env.TAGDEN_NO_LOGIN === '1') {
+    console.log('  [i] 已跳过启动登录（TAGDEN_NO_LOGIN=1）');
+  } else {
+    (async () => {
+      for (const key of ['inaturalist', 'duoshi']) {
+        try {
+          await sites.login(key);
+          console.log(`  [ok] ${SITE_META[key].name} 已登录`);
+        } catch (err) {
+          console.log(`  [!!] ${SITE_META[key].name} 登录失败：${err.message}`);
+          logLine('warn', `${SITE_META[key].name} 登录失败：${err.message}`);
+        }
       }
-    }
-  })();
+    })();
+  }
 
   if (!process.env.TAGDEN_NO_BROWSER) openBrowser(`http://127.0.0.1:${port}`);
 
@@ -3524,25 +4040,62 @@ server.listen(port, '127.0.0.1', () => {
     const n = pruneThumbs();
     if (n) console.log(`  清理缩略图缓存 ${n} 个`);
   }, 5000).unref?.();
+
+  // 识别结果缓存攒到几千条就按时间和条数清一批，同样不挡启动
+  setTimeout(() => {
+    const n = IDC.prune();
+    if (n) console.log(`  清理识别缓存 ${n} 条`);
+  }, 7000).unref?.();
 });
 
-/* 退出前把攒着没落盘的标签缓存写掉，下次打开少读一遍硬盘 */
+/* 退出前把攒着没落盘的配置和标签缓存写掉，下次打开少读一遍硬盘 */
+function shutdownNow(exitCode = 0) {
+  try {
+    flushConfig();
+  } catch {}
+  try {
+    LC.flushAll();
+  } catch {}
+  try {
+    LLAMA.shutdown(); // 别把 llama-server 留在后台吃内存
+  } catch {}
+  process.exit(exitCode);
+}
+
 for (const sig of ['SIGINT', 'SIGTERM']) {
   process.on(sig, () => {
-    try {
-      LC.flushAll();
-    } catch {}
-    try {
-      LLAMA.shutdown(); // 别把 llama-server 留在后台吃内存
-    } catch {}
-    process.exit(0);
+    logLine('info', `收到 ${sig}，正在退出`);
+    shutdownNow(0);
   });
 }
-// 黑窗口被直接关掉时不一定给 SIGINT，exit 里再兜一次
+// 黑窗口被直接关掉时不一定给 SIGINT，exit 里再兜一次（这里必须是同步操作）
 process.on('exit', () => {
+  try {
+    flushConfig();
+  } catch {}
+  try {
+    LC.flushAll();
+  } catch {}
   try {
     LLAMA.shutdown();
   } catch {}
+});
+
+// 未捕获异常：先落盘再退出。双击 exe 时窗口一闪而过，没有日志就完全没法排查。
+process.on('uncaughtException', (err) => {
+  logLine('fatal', '未捕获异常：' + (err && (err.stack || err.message) || err));
+  try {
+    console.error('');
+    console.error('  程序遇到未处理的错误，已写入日志：' + LOG_FILE);
+    console.error('  ' + (err && (err.message || err) || err));
+    console.error('');
+  } catch {}
+  shutdownNow(1);
+});
+
+// 未处理的 Promise 拒绝不一定致命（很多站点请求失败都走这里），记下来继续跑。
+process.on('unhandledRejection', (reason) => {
+  logLine('warn', '未处理的 Promise 拒绝：' + (reason && (reason.stack || reason.message) || reason));
 });
 
 /**

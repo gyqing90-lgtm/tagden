@@ -1,0 +1,21 @@
+{
+  "name": "tagden",
+  "version": "0.6.25",
+  "private": true,
+  "description": "物种标注工坊：本地批量图片识别 + 人工确认 + 物种名写回",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "check": "node tools/check-syntax.js",
+    "test": "node --test",
+    "build:win": "node build-exe.js",
+    "build:mac": "node build-mac.js",
+    "keygen": "node tools/update-keygen.js",
+    "sign": "node tools/sign-manifest.js",
+    "publish": "node tools/publish-oss.js --with-mac --verify",
+    "regions": "node tools/build-regions.js --download"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}

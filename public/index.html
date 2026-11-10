@@ -44,14 +44,25 @@
 </div>
 
 <div class="layout">
-  <aside class="rail">
-    <div class="rail-head">文件夹<button id="treeRefresh" class="rail-refresh" title="重新读取磁盘和文件夹（新插的 U 盘、刚建的文件夹）">↻</button></div>
+  <aside class="rail" id="rail">
+    <!-- 本机端 / 相册端：放在左栏顶部，和下面的「文件夹 / 自然在线相册」列表配套 -->
+    <div class="rail-src">
+      <div class="seg" id="srcSeg" title="照片从哪来：本机文件夹，还是自然在线账号里的相册。相册端可以批量识别、看各站置信度、挑候选写入鉴定">
+        <button data-src="local" class="on">本机端</button>
+        <button data-src="album">相册端</button>
+      </div>
+    </div>
+    <div class="rail-head" id="railHeadFiles">文件夹<button id="treeRefresh" class="rail-refresh" title="重新读取磁盘和文件夹（新插的 U 盘、刚建的文件夹）">↻</button></div>
     <div class="pathbox">
       <input id="pathInput" type="text" spellcheck="false" placeholder="粘贴完整路径，回车进入">
       <button id="goBtn" title="进入">↵</button>
     </div>
     <div id="places" class="places"></div>
     <div id="tree" class="tree"></div>
+
+    <!-- 相册端：左栏换成自然在线的相册列表（本机端时整块藏起来） -->
+    <div class="rail-head" id="railHeadAlbums" hidden>自然在线相册<button id="albumRailRefresh" class="rail-refresh" title="重新读一遍相册列表">↻</button></div>
+    <div id="albumRail" class="album-rail" hidden></div>
   </aside>
 
   <div class="gutter" id="gutRail" title="拖动调整文件夹栏宽度，双击复位"></div>
@@ -72,16 +83,10 @@
         <button id="selNone" class="ghost">清空</button>
         <button id="exportBtn" class="ghost" title="导出带拍摄时间和经纬度的标注明细、物种清单">导出清单</button>
         <button id="toScoreBtn" class="ghost" title="给当前这个文件夹的照片打技术分，按星级挑片，可再送去标注或传到自然在线">照片评分</button>
+        <button id="nameCheckBtn" class="ghost" title="只有中文名或只有学名的照片，用内置《中国生物物种名录》把另一侧补齐；确认后才写回">物种名核对</button>
         <button id="pasteBtn" class="ghost" title="不用打开文件夹：Ctrl+V 粘贴一张图、或直接拖进来，立刻看多站识别结果">粘贴单图识别</button>
-        <div class="nat-to" title="把勾选的图传到自然在线的相册里（本机原图不动）">
-          <select id="tagNatSel"><option value="">自然在线相册…</option></select>
-          <button id="tagNatBtn" class="ghost" disabled>移动到相册</button>
-          <div class="nat-to-new" id="tagNatNewBox" hidden>
-            <input id="tagNatNewName" type="text" spellcheck="false" placeholder="新相册名称">
-            <button id="tagNatNewOk" class="primary mini">建</button>
-            <button id="tagNatNewCancel" class="ghost mini" title="算了">×</button>
-          </div>
-        </div>
+        <!-- 相册端专用：对勾选的多张站点照片统一赋一个名字，一次提交鉴定（只传名字，不传图片） -->
+        <button id="tagBatchBtn" class="ghost" hidden title="相册端批量鉴定：对勾选的照片统一赋一个名字，一次写回自然在线（只传鉴定结果，不传图片）">批量鉴定</button>
         <button id="runBtn" class="primary" disabled>识别选中 <b id="selCount">0</b></button>
       </div>
     </div>
@@ -187,14 +192,13 @@
 
       <div class="nat-body">
         <div class="nat-photos">
+          <!-- 左栏固定是「本机端」：本页要靠文件树选文件夹、把照片或子文件夹拖到右边相册上传。
+               点右边某个相册，中间就换成站点照片（用来下载）；再点左栏「本机端」回到文件夹。
+               本页只管上传、下载，识别去「标注」页、评分去「照片评分」页。 -->
           <div class="nat-photos-bar">
-            <!-- 中间这块看什么：本机文件夹 / 相册照片 -->
-            <div class="nat-side" id="natSide" title="切换中间这块是看本机文件夹里的照片，还是看右边相册里的照片">
-              <button data-side="local" class="on">本机文件夹</button>
-              <button data-side="album">相册照片</button>
-            </div>
             <span class="nat-album-name" id="natAlbumName">选右边的相册看照片</span>
             <span class="nat-selinfo" id="natSelInfo"></span>
+            <span class="nat-drag-hint" id="natDragHint" hidden>拖照片 / 子文件夹到右边相册即可上传</span>
             <span class="nat-acts" id="natSelActs">
               <button id="natSelAll" class="ghost mini" title="勾上当前这一屏的所有照片（本机＝当前文件夹，相册＝当前这一页）" disabled>全选</button>
               <button id="natSelNone" class="ghost mini" title="取消所有勾选" disabled>清空</button>
@@ -205,14 +209,11 @@
               <button id="natLocalOpen" class="ghost mini" title="回到「标注」页打开这个文件夹">去标注页</button>
             </span>
             <span class="nat-acts" id="natAlbumActs" hidden>
-              <button id="natIdBtn" class="ghost mini" disabled title="用顶部选好的类群与模型，识别勾选的照片">识别选中</button>
-              <button id="natWriteBtn" class="ghost mini" disabled title="把名字写回自然在线的鉴定结果（只改鉴定结果，不上传图片、不新增照片）">写回鉴定</button>
-              <button id="natScoreBtn" class="ghost mini" disabled title="给勾选的站点照片打技术分（原图取回本机算，不上传）">评分选中</button>
-              <select id="natMoveSel" class="nat-sel" title="把勾选的照片移到哪个相册"></select>
-              <button id="natMoveBtn" class="ghost mini" disabled title="把勾选的照片移到选中的相册（站点原生移动，照片不重新上传）">移动到</button>
-              <button id="natDlBtn" class="ghost mini" disabled title="把勾选的照片打包成 zip 下载到本机">下载选中</button>
-              <button id="natDelBtn" class="ghost mini" disabled title="从相册里删除勾选的照片（不可恢复）">删除选中</button>
+              <button id="natReIdBtn" class="primary mini" title="把本机写好的鉴定结果同步到自然在线：只传鉴定结果，不传图片、不新增照片；传完重新读取站点返回的新名字">重新鉴定上传 <b id="natPendingTag">0</b></button>
+              <button id="natOrigBtn" class="ghost mini" disabled title="把勾选（或本页全部）照片的真·原图打包成 zip 下载到本机">下载原图</button>
+              <button id="natKmlBtn" class="ghost mini" disabled title="用勾选（或本页全部）照片里的 GPS 生成 KML 轨迹：连线 + 每个照片一个点">下载 KML 轨迹</button>
             </span>
+            <button id="natClearCacheBtn" class="ghost mini" title="清除本机缓存的自然在线图片；鉴定记录、评分记录、账号登录都不受影响，下次打开会重新从站点读取">清除缓存</button>
           </div>
           <div class="pager" id="natPager" hidden>
             <button id="natPgPrev" class="ghost mini">‹ 上一页</button>
@@ -301,15 +302,13 @@
         <span class="sc-aist sc-fml" title="综合分就是排序默认用的那个分数；只跑技术评分时显示的就是技术分">综合分 = 技术×0.55 + AI×0.45</span>
       </div>
 
-      <!-- 选择动作行：原来在页面最底下，太不显眼，挪到上面来 -->
+      <!-- 动作行：评分页只管评分。跨页的「送去标注 / 传到相册」已在别的页面有，不再重复 -->
       <div class="sc-actrow">
         <span id="scSummary">还没评分</span>
         <span class="sc-aist" id="scAiLeft"></span>
         <span class="nat-gap"></span>
+        <span class="sc-aist" id="scSource" title="评分对象跟随左栏最上面的「本机端 / 相册端」切换">本机端</span>
         <button id="scAiRunBtn" class="ghost mini" disabled title="对选中的照片调用 AI 判别">AI 判别选中</button>
-        <button id="scToTagBtn" class="ghost mini" disabled title="把选中的照片送回「标注」页并勾选">⤴ 送去标注</button>
-        <select id="scNatSel" class="nat-sel" title="目标相册"><option value="">自然在线相册…</option></select>
-        <button id="scToNatBtn" class="ghost mini" disabled title="把选中的照片传到自然在线相册">传到相册</button>
       </div>
 
       <div class="sc-dirs" id="scDirs" hidden></div>
@@ -495,14 +494,14 @@
       </div>
       <div id="pvSites" class="pvs"></div>
 
-      <div class="sec-title">手动填写</div>
-      <div class="manual">
+      <div class="sec-title only-local">手动填写</div>
+      <div class="manual only-local">
         <input id="inCn" type="text" placeholder="中文名">
         <input id="inLatin" type="text" placeholder="学名（拉丁）">
         <input id="inNote" type="text" placeholder="备注：地点、生境…（可选）">
       </div>
 
-      <div class="panel-foot">
+      <div class="panel-foot only-local">
         <label class="check"><input id="chkRename" type="checkbox"> 同时重命名文件</label>
 
         <div id="renameOpts" class="rename-opts" hidden>
@@ -538,6 +537,16 @@
           <input id="autoNextChk" type="checkbox" checked> 写入后自动跳到下一张待确认
         </label>
         <div id="writeMsg" class="msg"></div>
+      </div>
+
+      <!-- 相册端：先把选中的鉴定写进本机记录，再由「重新鉴定上传」把纯名字同步到平台 -->
+      <div class="panel-foot only-nat" id="natPanelFoot" hidden>
+        <div class="foot-row">
+          <button id="natWriteOne" class="primary wide" disabled>写入鉴定</button>
+          <button id="natReIdShortcut" class="ghost" title="把写好的鉴定结果同步到自然在线（只传名字，不传图片），同步后重新读取站点的新鉴定结果">重新鉴定上传 <b id="natPendingCount">0</b></button>
+        </div>
+        <div class="dim nat-write-hint" id="natWriteHint">选中上面的候选 → 点「写入鉴定」先存到本机；再点「重新鉴定上传」把鉴定结果同步到自然在线。<b>图片始终不上传</b>，同步后会重新读取站点返回的新鉴定结果。</div>
+        <div id="natWriteMsg" class="msg"></div>
       </div>
     </div>
   </aside>
@@ -675,8 +684,8 @@
 <!-- 写回鉴定：把工坊改好的名字提交到自然在线，只改鉴定结果、不传图片 -->
 <div class="mask" id="natWriteMask">
   <div class="sheet nw">
-    <h3>写回鉴定到自然在线</h3>
-    <p class="tip">把下面的名字作为「重新鉴定」提交到网页端，站点会覆盖这些照片的鉴定结果。<b>不上传图片、不新增照片、不删除原图</b>。提交前请确认名字无误。</p>
+    <h3 id="nwTitle">写回鉴定到自然在线</h3>
+    <p class="tip" id="nwTip">把下面的名字作为「重新鉴定」提交到网页端，站点会覆盖这些照片的鉴定结果。<b>不上传图片、不新增照片、不删除原图</b>。提交前请确认名字无误。</p>
     <div class="nw-bar">
       <span id="nwCount">已选 0 张</span>
       <label class="nw-chk"><input type="checkbox" id="nwBatch"> 勾选的照片用同一个名字</label>
@@ -701,6 +710,25 @@
     <div class="sheet-actions">
       <button id="nwSubmit" class="primary">提交写回</button>
       <button id="nwCancel" class="ghost">取消</button>
+    </div>
+  </div>
+</div>
+
+<!-- 物种名核对：把只有中文名 / 只有学名的照片，用内置名录补齐另一侧 -->
+<div class="mask" id="nameCheckMask">
+  <div class="sheet nc">
+    <h3>物种名核对</h3>
+    <p class="tip" id="ncTip">只处理「只有中文名」或「只有学名」的照片。内置《中国生物物种名录》离线查表补齐另一侧，确认后才会写回；重名的会列出候选让你自己挑。</p>
+    <div class="nc-bar">
+      <span id="ncSummary">准备中…</span>
+      <label class="check" title="内置名录查不到时，用自然在线分类库再查一次（需要能连上站点）"><input id="ncOnline" type="checkbox"> 联网补查</label>
+      <button id="ncRedo" class="ghost mini">重新核对</button>
+    </div>
+    <div class="nc-list" id="ncList"></div>
+    <div class="nc-err" id="ncErr"></div>
+    <div class="sheet-actions">
+      <button id="ncApply" class="primary" disabled>写入补齐的名字</button>
+      <button id="ncCancel" class="ghost">取消</button>
     </div>
   </div>
 </div>

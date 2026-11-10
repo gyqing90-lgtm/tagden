@@ -1,0 +1,20 @@
+# 行尾策略：只固定必须固定的两类，别对现有文本做一次性大换行。
+# Windows 批处理必须是 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 历史原因：lib/adapters.js 是从聚合台按 CRLF 拷过来的。
+# 先用属性把 CRLF 固定住，避免以后被编辑器/格式化工具改成 LF 后出现「多行内容匹配不上」。
+lib/adapters.js text eol=crlf
+
+# 二进制资源不要做行尾转换
+*.exe binary
+*.zip binary
+*.7z binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.gif binary
+*.bin binary
+*.gguf binary
