@@ -1,4 +1,6 @@
-v0.6.26（开发中）
+v0.6.26（2026-11-11 发布）
+· 图片卡片右下角新增放大镜按钮：只有点它才打开大图，点缩略图本身只选中，减少误触；原大图里的滚轮缩放 / 拖动 / 左右翻图保留
+· 自然在线相册支持拖动移动：框选/勾选照片后，把卡片拖到右侧另一个相册即可移动（站点原生 move，不重传图片、photoId 和鉴定记录不变）；也可拖到「＋ 拖到这里新建相册」
 · 新增 GitHub Actions CI：ubuntu / windows 双平台跑 node:test、全量语法检查、canary self-test；Windows 额外用 PowerShell Parser 检查 tools/smoke-win.ps1
 · 新增 tools/canary.js + test/fixtures/canary：固定蝴蝶/真实植物照片，逐站点检查接口、登录、解析、耗时；默认只跑免登录/免费站点，--all 才碰付费站点，--strict 才要求 Top5 命中预期物种
 · 新增 .github/workflows/canary.yml：手动跑真实站点，默认免登录白名单；要测多识/iNaturalist/Pl@ntNet 时在仓库 Secret 配 TAGDEN_CANARY_CONFIG，可在页面上勾 --all / --strict，报告作为 artifact 保留

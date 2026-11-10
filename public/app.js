@@ -930,13 +930,21 @@ function folderCardHtml(d) {
       </div>`;
 }
 
+/** 卡片右下角的放大镜按钮：只有点它才打开大图，避免点缩略图误触 */
+function zoomBtnHtml(key) {
+  return `<button type="button" class="zoom-btn" data-zoom="${esc(key)}" draggable="false" title="放大查看" aria-label="放大查看">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.2"></circle><path d="m15.2 15.2 4.6 4.6M10.5 7.7v5.6M7.7 10.5h5.6"></path></svg>
+        </button>`;
+}
+
 function cardHtml(f) {
   return `<div class="card${S.sel.has(f.path) ? ' sel' : ''}${S.active === f.path ? ' active' : ''}" data-p="${esc(f.path)}">
-        <div class="thumb" title="单击看大图；点左上角圆圈勾选">
+        <div class="thumb" title="单击选中；点右下角放大镜看大图；点左上角圆圈勾选">
           <img loading="lazy" decoding="async" class="${rotCls(f.orient)}" src="/img?path=${enc(f.path)}&amp;thumb=1" alt="">
           <span class="tick" title="单击勾选">${S.sel.has(f.path) ? '✓' : ''}</span>
           ${badgeOf(f)}
           ${scoreBadge(f)}
+          ${zoomBtnHtml(f.path)}
         </div>
         <div class="meta" title="单击勾选；双击手写中文名 / 拉丁名"><div class="nm" title="${esc(f.name)}">${esc(f.name)}</div><div class="sz">${kb(f.size)}</div></div>
       </div>`;
@@ -1158,11 +1166,17 @@ function bindGridEvents(grid, withFolders) {
     const card = e.target.closest('.card');
     if (!card || !card.dataset.p) return;
     const p = card.dataset.p;
-    if (e.target.closest('.thumb')) {
-      // 小圆圈和状态徽标仍是勾选；点照片本身 = 看大图
-      if (e.target.closest('.tick') || e.target.closest('.badge')) { toggle(p); return; }
+    // 只有右下角放大镜打开大图；点缩略图本身只是选中
+    if (e.target.closest('.zoom-btn')) {
+      e.preventDefault();
       activateCard(p);
       openZoom();
+      return;
+    }
+    if (e.target.closest('.thumb')) {
+      // 小圆圈和状态徽标仍是勾选；点照片本身 = 选中
+      if (e.target.closest('.tick') || e.target.closest('.badge')) { toggle(p); return; }
+      activateCard(p);
       return;
     }
     if (e.detail > 1) return; // 双击的第二下不要重复勾选
@@ -1800,7 +1814,11 @@ function zoomAnchor(e, st) {
 }
 
 function zoomList() {
-  try { return pageView().all || []; } catch { return []; }
+  try {
+    // 自然在线页看的是站点相册：没有 S.files 的本地路径，用 NAT.photos 拼同样的伪文件
+    if (S.tab === 'nature' && NAT.side === 'album') return (NAT.photos || []).map(natPhotoAsFile);
+    return pageView().all || [];
+  } catch { return []; }
 }
 
 function zoomIndexText(p) {
@@ -1810,7 +1828,14 @@ function zoomIndexText(p) {
 }
 
 function zoomLoad(p) {
-  const f = S.byPath.get(p) || S.files.find((x) => x.path === p);
+  const files = Array.isArray(S.files) ? S.files : [];
+  let f = S.byPath.get(p) || files.find((x) => x.path === p);
+  // 自然在线页的站点照片不在 S.files 里，按 photoId 从 NAT.photos 找
+  if (!f && isNatKey(p)) {
+    const id = p.slice(NAT_KEY.length);
+    const np = (NAT.photos || []).find((x) => String(x.photoId) === id);
+    if (np) f = natPhotoAsFile(np);
+  }
   const img = $('zoomImg');
   if (img) {
     // 相册照片没有本地路径，原图要从站点的图片接口拿
@@ -1849,7 +1874,24 @@ function closeZoom() {
 
 /** 翻到本层筛选结果里的上一张/下一张；右侧详情和网格高亮一起跟着走 */
 function zoomStep(d) {
-  // 相册端：在「相册这一页」里翻，不掺本机那套分页换算
+  // 自然在线页的站点相册：在本页 NAT.photos 里翻
+  if (S.tab === 'nature' && NAT.side === 'album') {
+    const list = NAT.photos || [];
+    if (!list.length) return;
+    let i = list.findIndex((x) => NAT_KEY + String(x.photoId) === ZOOM.path);
+    if (i < 0) i = 0;
+    const j = Math.min(list.length - 1, Math.max(0, i + d));
+    if (j === i) return;
+    const p = NAT_KEY + String(list[j].photoId);
+    ZOOM.s = 1;
+    ZOOM.tx = 0;
+    ZOOM.ty = 0;
+    S.active = p;
+    zoomLoad(p);
+    zoomPaint();
+    return;
+  }
+  // 标注页的相册端：在「相册这一页」里翻，不掺本机那套分页换算
   if (S.mode === 'album') {
     const list = S.files || [];
     if (!list.length) return;
@@ -4415,7 +4457,7 @@ function renderNatAlbums() {
   }
   list.innerHTML = NAT.albums
     .map(
-      (a) => `<div class="nat-album${NAT.album && NAT.album.id === a.id ? ' on' : ''}" data-id="${esc(a.id)}" data-title="${esc(a.title)}">
+      (a) => `<div class="nat-album${NAT.album && NAT.album.id === a.id ? ' on' : ''}" data-id="${esc(a.id)}" data-title="${esc(a.title)}" title="点击查看；把勾选的照片拖到这里移动">
         <span class="ttl" title="${esc(a.title)}">${esc(a.title)}</span>
         <span class="cnt">${a.count || 0}</span>
         <button class="del" data-del="${esc(a.id)}" title="删除这个相册">×</button>
@@ -4554,9 +4596,10 @@ function albumCardHtml(f) {
   const orig = [p.cname, p.lname].filter(Boolean).join(' ');
   const sub = orig || [p.date, p.place].filter(Boolean).join(' · ') || (f.size ? kb(f.size) : '站点未命名');
   return `<div class="card${on ? ' sel' : ''}${act ? ' active' : ''}" data-p="${esc(f.path)}">
-        <div class="thumb" title="单击看大图；点左上角圆圈勾选">
+        <div class="thumb" title="单击选中；点右下角放大镜看大图；点左上角圆圈勾选">
           <img loading="lazy" decoding="async" src="/api/nat/img?u=${enc(p.thumb || p.full || '')}" alt="">
           <span class="tick" title="单击勾选">${on ? '✓' : ''}</span>
+          ${zoomBtnHtml(f.path)}
         </div>
         <div class="meta" title="单击勾选；双击手写中文名 / 拉丁名"><div class="nm" title="${esc(f.name)}">${esc(f.name)}</div><div class="sz">${esc(sub)}</div>${albumCardLine(f.path)}</div>
       </div>`;
@@ -4845,7 +4888,7 @@ function syncNatSideUI(reload) {
   if ($('natDragHint')) {
     $('natDragHint').hidden = false;
     $('natDragHint').textContent = albumMode
-      ? '点左栏「本机端」回到本机文件夹'
+      ? '勾选照片后，拖到右边相册即可移动；点左栏「本机端」回文件夹'
       : '拖照片 / 子文件夹到右边相册即可上传';
   }
   if (!reload) { natSyncSel(); return; }
@@ -4918,11 +4961,12 @@ function renderNatLocal() {
     card.className = `card${on ? ' sel' : ''}`;
     card.dataset.p = f.path;
     card.draggable = true;
-    card.title = `${f.name}｜单击勾选；拖到右边相册上传`;
+    card.title = `${f.name}｜单击勾选；拖到右边相册上传；点右下角放大镜看大图`;
     card.innerHTML = `
       <div class="thumb">
         <img loading="lazy" decoding="async" draggable="false" src="/img?path=${enc(f.path)}&amp;thumb=1" alt="">
         <span class="tick">${on ? '✓' : ''}</span>
+        ${zoomBtnHtml(f.path)}
       </div>
       <div class="meta">
         <div class="nm" title="${esc(f.name)}">${esc(f.name)}</div>
@@ -4994,15 +5038,19 @@ function renderNatPhotos() {
     const card = document.createElement('div');
     card.className = 'card' + (on ? ' sel' : '');
     card.dataset.id = p.photoId;
+    card.draggable = on;
+    card.setAttribute('draggable', on ? 'true' : 'false');
     const label = [p.cname, p.lname].filter(Boolean).join(' ') || p.fileName || p.photoId;
     // 第二行只放日期/地点：标题已经是文件名时再重复一遍没意义
     const sub = [p.date, p.place].filter(Boolean).join(' · ');
     const src = p.thumb || p.full;
+    card.title = `${label}｜单击勾选；勾选后可拖到右边相册；点右下角放大镜看大图`;
     card.innerHTML = `
       <div class="thumb">
-        <img loading="lazy" decoding="async" src="/api/nat/img?u=${enc(src)}" alt="">
+        <img loading="lazy" decoding="async" draggable="false" src="/api/nat/img?u=${enc(src)}" alt="">
         <span class="tick">${on ? '✓' : ''}</span>
         ${natScoreBadge(p)}
+        ${zoomBtnHtml(NAT_KEY + p.photoId)}
       </div>
       <div class="meta">
         <div class="nm" title="${esc(label)}">${esc(label)}</div>
@@ -5088,6 +5136,11 @@ function natSelApply() {
       const want = on ? '✓' : '';
       if (tk.textContent !== want) tk.textContent = want; // 大文件夹框选拖动时别做无谓 DOM 写
     }
+    // 相册照片只有勾选后才可拖：未勾选时按下仍能拉框选，不会一碰就变拖拽
+    if (!localMode) {
+      card.draggable = on;
+      card.setAttribute('draggable', on ? 'true' : 'false');
+    }
   }
   natSyncSel();
 }
@@ -5109,8 +5162,9 @@ function natSelectNone() {
 
 /** 框选：在照片区按住拖出橡皮筋，框住的即勾上；Shift/Ctrl 按住拖是在已有勾选上追加。
  *  和评分页 bindScMarquee 一个套路（document 级 move/up，别用 setPointerCapture），
- *  差别是这里**卡片上也可以起笔**：移动不足 4px 视为单击（仍走 onclick 勾选），
+ *  差别是这里**未勾选的卡片上也可以起笔**：移动不足 4px 视为单击（仍走 onclick 勾选），
  *  超过就进框选，并用 NAT.marqMoved 吞掉松手后紧跟的那次 click，防止刚框到的又被取消。
+ *  勾选后的相册卡片才变成 draggable，这样「框选」和「拖到另一个相册」不抢手势。
  */
 function bindNatMarquee() {
   const grid = $('natGrid');
@@ -5720,15 +5774,36 @@ async function natHandleDrop(dt, target) {
 const DIR_MIME = 'application/x-tagden-dir';
 /** 本页卡片拖出来的照片路径（JSON 数组）；和 DIR_MIME 分开，drop 时好区分 */
 const PATH_MIME = 'application/x-tagden-paths';
+/** 自然在线相册里勾选的照片 id（JSON 数组）：拖到另一个相册是「移动」，不是重传 */
+const ALBUM_MIME = 'application/x-tagden-photos';
 
-/** 这次拖的是「本程序文件夹节点」/「本页照片」/「系统文件管理器里的文件」 */
+/** 这次拖的是「本程序文件夹节点」/「本页照片路径」/「站点相册照片 id」/「系统文件」 */
 function dropKinds(dt) {
   const types = dt ? [...(dt.types || [])] : [];
-  return { dir: types.includes(DIR_MIME), paths: types.includes(PATH_MIME), files: types.includes('Files') };
+  return {
+    dir: types.includes(DIR_MIME),
+    paths: types.includes(PATH_MIME),
+    album: types.includes(ALBUM_MIME),
+    files: types.includes('Files'),
+  };
 }
 
 /** 自然在线·本机端卡片起拖：文件夹给目录，照片给路径列表（勾了多张就整批拖） */
 function natDragStart(e) {
+  if (e.target.closest && e.target.closest('.zoom-btn')) return;
+
+  // 相册端：勾选的照片拖到另一个相册 = 站点原生 move，photoId 和鉴定都不变
+  if (NAT.side === 'album') {
+    const card = e.target.closest && e.target.closest('.card[data-id]');
+    if (!card || !card.dataset.id || !NAT.sel.has(card.dataset.id)) return;
+    const ids = NAT.sel.size > 1 ? [...NAT.sel] : [card.dataset.id];
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData(ALBUM_MIME, JSON.stringify(ids));
+    e.dataTransfer.setData('text/plain', ids.join('\n'));
+    NAT.dragging = true;
+    return;
+  }
+
   if (NAT.side !== 'local') return;
   const folder = e.target.closest && e.target.closest('.card.folder');
   if (folder && folder.dataset.d) {
@@ -5800,18 +5875,56 @@ async function natHandlePathsDrop(paths, target) {
   }
 }
 
+/**
+ * 相册照片拖到另一个相册：走 /api/nat/photos/move（站点原生移动，不重传、不换 photoId）。
+ * 拖到「＋ 新建相册」时先建相册，再把照片移进去。
+ */
+async function natHandleAlbumMove(ids, target) {
+  if (!NAT.loggedIn) return toast('先在「自然在线」页登录');
+  const list = [...new Set((ids || []).map(String).filter(Boolean))];
+  if (!list.length) return;
+  if (target.kind === 'album' && NAT.album && String(target.id) === String(NAT.album.id)) {
+    return toast('这些照片已经在当前相册');
+  }
+  let albumId = target.id;
+  let title = (NAT.albums.find((a) => String(a.id) === String(albumId)) || {}).title || '目标相册';
+  try {
+    if (target.kind === 'new') {
+      title = `移动的照片 ${new Date().toISOString().slice(0, 10)}`;
+      const r = await post('/api/nat/albums', { title });
+      albumId = r.id;
+    }
+    await post('/api/nat/photos/move', { albumId, ids: list });
+    NAT.sel.clear();
+    await natLoadAlbums();
+    if (NAT.album) {
+      await natLoadPhotos();
+      const pages = Math.max(1, Math.ceil(NAT.total / NAT.size));
+      if (NAT.page > pages) {
+        NAT.page = pages;
+        await natLoadPhotos();
+      }
+    }
+    natSyncSel();
+    toast(`已移动 ${list.length} 张到「${title}」`, 2600);
+  } catch (err) {
+    toast('移动失败：' + err.message, 4200);
+  }
+}
+
 function natBindDrop(el, getTarget, highlight, allow) {
   if (!el) return;
   const ok = allow || {};
   const takes = (k) =>
     (k.dir && ok.dir !== false)
     || (k.paths && ok.paths !== false)
+    || (k.album && ok.album !== false)
     || (k.files && ok.files !== false);
   el.addEventListener('dragover', (e) => {
     const k = dropKinds(e.dataTransfer);
     if (!takes(k)) return;
     e.preventDefault();
-    e.dataTransfer.dropEffect = 'copy';
+    e.dataTransfer.dropEffect = k.album ? 'move' : 'copy';
     if (highlight) highlight(e, true);
     else el.classList.add('drop-on');
   });
@@ -5831,8 +5944,13 @@ function natBindDrop(el, getTarget, highlight, allow) {
     if (k.paths) {
       try { paths = JSON.parse(e.dataTransfer.getData(PATH_MIME) || '[]'); } catch { paths = []; }
     }
+    let albumIds = [];
+    if (k.album) {
+      try { albumIds = JSON.parse(e.dataTransfer.getData(ALBUM_MIME) || '[]'); } catch { albumIds = []; }
+    }
     const t = getTarget(e);
     if (!t) return toast('先在右边选一个目标相册');
+    if (albumIds.length) return natHandleAlbumMove(albumIds, t);
     if (dirPath) return natHandleDirDrop(dirPath, t);
     if (paths.length) return natHandlePathsDrop(paths, t);
     await natHandleDrop(e.dataTransfer, t);
@@ -5857,7 +5975,7 @@ function bindNatDrops() {
   for (const el of [$('natGrid'), $('natEmpty')]) {
     // 照片区只接「系统里拖进来的文件 / 左栏的文件夹」；本页卡片拖到这儿不算上传，
     // 免得手一抖在网格里松手就传了一遍
-    natBindDrop(el, () => (NAT.album ? { kind: 'album', id: NAT.album.id } : null), null, { paths: false });
+    natBindDrop(el, () => (NAT.album ? { kind: 'album', id: NAT.album.id } : null), null, { paths: false, album: false });
   }
   // 本机端卡片起拖（照片按路径、子文件夹按目录）——监听挂在网格上，重铺卡片不用重绑
   const grid = $('natGrid');
@@ -6319,6 +6437,21 @@ function bindNature() {
     if (NAT.marqMoved) { NAT.marqMoved = false; return; }
     // 刚把卡片拖到相册：拖拽收尾偶尔会补一个 click，别顺手进了文件夹
     if (NAT.dragging) { NAT.dragging = false; return; }
+    // 右下角放大镜：不切换勾选，只打开大图
+    const zoomBtn = e.target.closest('.zoom-btn');
+    if (zoomBtn) {
+      e.preventDefault();
+      const zc = zoomBtn.closest('.card');
+      if (!zc) return;
+      if (NAT.side === 'album') {
+        if (!zc.dataset.id) return;
+        S.active = NAT_KEY + zc.dataset.id;
+      } else {
+        S.active = zc.dataset.p || null;
+      }
+      openZoom();
+      return;
+    }
     if (NAT.side === 'local') {
       const folder = e.target.closest('.card.folder');
       if (folder && folder.dataset.d) { loadDir(folder.dataset.d); return; }
@@ -6340,6 +6473,8 @@ function bindNature() {
     if (NAT.sel.has(id)) NAT.sel.delete(id);
     else NAT.sel.add(id);
     card.classList.toggle('sel', NAT.sel.has(id));
+    card.draggable = NAT.sel.has(id);
+    card.setAttribute('draggable', NAT.sel.has(id) ? 'true' : 'false');
     const tick = card.querySelector('.tick');
     if (tick) tick.textContent = NAT.sel.has(id) ? '✓' : '';
     natSyncSel();
