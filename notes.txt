@@ -1,3 +1,11 @@
+v0.6.26（开发中）
+· 新增 GitHub Actions CI：ubuntu / windows 双平台跑 node:test、全量语法检查、canary self-test；Windows 额外用 PowerShell Parser 检查 tools/smoke-win.ps1
+· 新增 tools/canary.js + test/fixtures/canary：固定蝴蝶/真实植物照片，逐站点检查接口、登录、解析、耗时；默认只跑免登录/免费站点，--all 才碰付费站点，--strict 才要求 Top5 命中预期物种
+· 新增 .github/workflows/canary.yml：手动跑真实站点，默认免登录白名单；要测多识/iNaturalist/Pl@ntNet 时在仓库 Secret 配 TAGDEN_CANARY_CONFIG，可在页面上勾 --all / --strict，报告作为 artifact 保留
+· lib/nat-share.js 在缺少 lib/seed.js 时不再加载失败（CI / 纯源码树可以跑测试和 canary self-test）
+· Pl@ntNet 的 404 文案分开处理「图里没有植物」和「区系不存在」；canary 的植物素材换成真实橡皮树照片，Pl@ntNet 恢复 10/10
+· 测试保持 28 项；canary 默认 10 个任务实测全通过（quarryman / butterflyai / duoshi / iNaturalist / iplant / plantnet）
+
 v0.6.25（2026-11-10 发布）
 · OSS 发布凭据外置：不再从项目根读 oss.config.json，优先 ~/.tagden/oss.config.json（600）、--config 或 OSS_CONFIG/OSS_* 环境变量；仓库里不再出现 AK，换机/交接只需带加密的配置或设环境变量
 · 统计页行政区划改离线：内置 GeoNames cities15000 的 1602 个城市 / 31 个省（gzip 约 24 KB，CC BY 4.0），按最近城市给出「省·市」，离最近城市超过 80 km 时回落到文件夹名；不再请求 bigdatacloud，不再把 GPS 发给第三方，也不再需要 CACHE/geo.json

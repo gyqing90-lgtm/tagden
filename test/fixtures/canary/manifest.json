@@ -1,0 +1,26 @@
+{
+  "images": [
+    {
+      "id": "butterfly",
+      "mime": "image/jpeg",
+      "file": "butterfly.jpg",
+      "small": "butterfly.small.jpg",
+      "jpeg": "butterfly.jpeg",
+      "groups": ["insect", "animal", "general"],
+      "expected": ["Endoclita sinensis", "中华蝠蛾"],
+      "expectedSites": ["quarryman", "butterflyai", "butterflyai-butterfly"],
+      "defaultSites": ["quarryman", "butterflyai", "butterflyai-butterfly", "duoshi", "inaturalist"]
+    },
+    {
+      "id": "plant",
+      "mime": "image/jpeg",
+      "file": "plant.jpg",
+      "small": "plant.small.jpg",
+      "jpeg": "plant.jpeg",
+      "groups": ["plant", "general"],
+      "expected": [],
+      "expectedSites": [],
+      "defaultSites": ["quarryman-plant", "iplant", "plantnet", "duoshi-plant", "inaturalist"]
+    }
+  ]
+}

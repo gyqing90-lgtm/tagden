@@ -1,0 +1,8 @@
+{
+  "_说明": "复制到仓库外的 ~/.tagden/oss.config.json（权限 600），或用 --config / OSS_CONFIG / OSS_* 环境变量。",
+  "_注意": "akSecret 等同于该账号的写权限：别提交到仓库、别发给别人、别写进文档。",
+  "bucket": "填你的桶名",
+  "region": "填地域，例如 oss-cn-hangzhou（写 cn-hangzhou 也行）",
+  "akId": "填 AccessKey ID",
+  "akSecret": "填 AccessKey Secret"
+}

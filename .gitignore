@@ -42,3 +42,6 @@ screenshots/
 # ---------- 更新清单签名私钥（公钥 update-pubkey.pem 要进仓库） ----------
 update-signing-key.pem
 *-signing-key.pem
+
+# ---------- 站点 canary 本地报告 ----------
+canary-report*.json

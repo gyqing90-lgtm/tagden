@@ -22,6 +22,9 @@ npm test         # node:test 回归：合并、名录、加解密、版本比较
 TAGDEN_NO_LOGIN=1 npm start      # 跳过启动时对 iNaturalist / 多识的静默登录
 TAGDEN_NO_GEOCODE=1 npm start    # 统计页连本地行政区划标签也不加，只用文件夹名
 npm run regions                  # 重新生成 public/regions.bin（需联网下载 GeoNames 数据）
+npm run canary                   # 真实站点冒烟（免费站点；需 data/config.json 或内置种子）
+npm run canary -- --self-test    # 只检查素材/站点表，不联网（CI 用）
+npm run canary -- --all          # 连付费/可选站点一起跑（会消耗额度）
 
 # Windows 冒烟（在 Windows 上跑，不碰真实 data/）：
 powershell -ExecutionPolicy Bypass -File .\tools\smoke-win.ps1 -Exe .\tagden-0.6.25.exe

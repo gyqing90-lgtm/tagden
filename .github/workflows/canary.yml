@@ -1,0 +1,55 @@
+name: canary-live
+
+# 手动跑真实站点；默认只跑免登录站点，避免没有 secret 时误报。
+# 要跑多识 / iNaturalist / Pl@ntNet 等需要凭据的站点：
+#   1) 在仓库 Settings -> Secrets -> Actions 添加 TAGDEN_CANARY_CONFIG
+#      内容是 {"sites":{"duoshi":{"username":"...","password":"..."},"inaturalist":{...},"plantnet":{"apiKey":"..."}}}
+#   2) workflow_dispatch 时把 sites 留空（用脚本默认站点）或勾选 all。
+on:
+  workflow_dispatch:
+    inputs:
+      sites:
+        description: "逗号分隔的站点 key；留空=脚本默认（需要 secret）"
+        required: false
+        default: "quarryman,iplant,butterflyai,butterflyai-butterfly,quarryman-plant"
+      all:
+        description: "包含付费/可选站点（会消耗额度，需要 secret）"
+        type: boolean
+        default: false
+      strict:
+        description: "要求 expectedSites 的 Top5 命中预期物种"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+      - name: live canary
+        shell: bash
+        env:
+          TAGDEN_CANARY_CONFIG: ${{ secrets.TAGDEN_CANARY_CONFIG }}
+          SITES: ${{ inputs.sites }}
+          ALL: ${{ inputs.all }}
+          STRICT: ${{ inputs.strict }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [ -n "${SITES:-}" ]; then args+=(--sites "$SITES"); fi
+          if [ "${ALL:-false}" = "true" ]; then args+=(--all); fi
+          if [ "${STRICT:-false}" = "true" ]; then args+=(--strict); fi
+          node tools/canary.js "${args[@]}" --json canary-report.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: canary-report
+          path: canary-report.json
+          if-no-files-found: ignore
