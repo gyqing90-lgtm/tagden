@@ -2590,6 +2590,7 @@ button.accent:disabled { opacity: .55; }
   position: fixed; width: min(310px, 92vw); z-index: 90;
   background: #fff; border: 1px solid var(--line); border-radius: 12px;
   box-shadow: 0 16px 40px rgba(16, 32, 48, .22); padding: 12px 13px;
+  max-height: calc(100vh - 24px); overflow: auto;
 }
 .name-edit .ne-head { display: flex; flex-direction: column; gap: 2px; margin-bottom: 8px; font-size: 13px; }
 .name-edit .ne-head span { font-size: 11px; color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -2888,6 +2889,9 @@ html, body {
 .preset select { border-radius: 9px; border-color: var(--line); background: var(--card); }
 
 .engine-wrap { position: relative; display: inline-flex; align-items: center; }
+/* 顶栏自己有 backdrop-filter，会单独形成一个层叠上下文：不抬 z-index 的话，
+   「识别源」浮层会被后面的标签栏 / 内容盖住，只露出上半截 */
+.top { position: relative; z-index: 30; }
 .engine-wrap .chips {
   display: none;
   position: absolute;
@@ -2903,6 +2907,10 @@ html, body {
   box-shadow: 0 16px 40px rgba(31, 42, 34, .16);
   justify-content: flex-start;
   flex-wrap: wrap;
+  /* 站点多的时候别把浮层撑出屏幕：超了就自己滚 */
+  max-height: calc(100vh - 120px);
+  overflow: auto;
+  overscroll-behavior: contain;
 }
 .engine-wrap .chips.open { display: flex; }
 .engine-wrap .chips .chip {
@@ -3489,6 +3497,31 @@ html[data-theme="dark"] .toast { background: #26352c; color: #f2f7f3; }
   flex: 0 0 auto;
 }
 .rail-collapse:hover { color: var(--green-d); background: var(--green-l); }
+/* 收起左栏的小三角：贴在左栏右边缘正中（压在分隔条上），本机端 / 相册端都在同一个位置，
+   不占标题行的位置，也不压住文件树的滚动条 */
+.layout { position: relative; }
+.rail-fold {
+  position: absolute;
+  top: 50%;
+  left: calc(var(--rail-w, 288px) + 4px);
+  transform: translate(-50%, -50%);
+  z-index: 7;
+  width: 18px;
+  height: 54px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--card);
+  color: var(--ink-3);
+  font-size: 15px;
+  line-height: 1;
+  display: grid;
+  place-items: center;
+  box-shadow: 0 2px 8px rgba(31, 42, 34, .1);
+  opacity: .92;
+}
+.rail-fold:hover { color: var(--green-d); background: var(--green-l); opacity: 1; }
+.layout.rail-collapsed .rail-fold { display: none; }
 .rail-expand {
   display: none;
   position: fixed;
@@ -3538,9 +3571,11 @@ html[data-theme="dark"] .toast { background: #26352c; color: #f2f7f3; }
   .layout.rail-collapsed .rail { display: flex; }
   .layout.rail-collapsed .rail-expand,
   .layout.rail-collapsed .rail-collapse,
-  .rail-collapse { display: none; }
+  .rail-collapse,
+  .rail-fold { display: none; }
 }
 html[data-theme="dark"] .rail-expand,
+html[data-theme="dark"] .rail-fold,
 html[data-theme="dark"] .rail-collapse {
   background: var(--card);
   border-color: var(--line);

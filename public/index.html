@@ -59,7 +59,7 @@
         <button data-src="album">相册端</button>
       </div>
     </div>
-    <div class="rail-head" id="railHeadFiles"><button id="railCollapse" class="rail-collapse" type="button" title="收起文件夹栏">‹</button>文件夹<button id="treeRefresh" class="rail-refresh" title="重新读取磁盘和文件夹（新插的 U 盘、刚建的文件夹）">↻</button></div>
+    <div class="rail-head" id="railHeadFiles">文件夹<button id="treeRefresh" class="rail-refresh" title="重新读取磁盘和文件夹（新插的 U 盘、刚建的文件夹）">↻</button></div>
     <div class="pathbox">
       <input id="pathInput" type="text" spellcheck="false" placeholder="粘贴完整路径，回车进入">
       <button id="goBtn" title="进入">↵</button>
@@ -68,9 +68,12 @@
     <div id="tree" class="tree"></div>
 
     <!-- 相册端：左栏换成自然在线的相册列表（本机端时整块藏起来） -->
-    <div class="rail-head" id="railHeadAlbums" hidden><button id="albumRailCollapse" class="rail-collapse" type="button" title="收起文件夹栏">‹</button><span>自然在线相册</span><b id="albumRailCount">0</b><button id="albumRailNewBtn" class="rail-refresh" type="button" title="新建相册">＋</button><button id="albumRailRefresh" class="rail-refresh" title="重新读一遍相册列表">↻</button></div>
+    <div class="rail-head" id="railHeadAlbums" hidden><span>自然在线相册</span><b id="albumRailCount">0</b><button id="albumRailNewBtn" class="rail-refresh" type="button" title="新建相册">＋</button><button id="albumRailRefresh" class="rail-refresh" title="重新读一遍相册列表">↻</button></div>
     <div id="albumRail" class="album-rail" hidden></div>
   </aside>
+
+  <!-- 收起左栏：贴在左栏右边缘正中（本机端 / 相册端都在同一个位置），收起后由右侧的 › 展开 -->
+  <button id="railFold" class="rail-fold" type="button" title="收起左栏" aria-label="收起左栏">‹</button>
 
   <button id="railExpand" class="rail-expand" type="button" title="展开文件夹栏">›</button>
 
@@ -443,7 +446,7 @@
       <div class="mask" id="scLocalMask">
         <div class="sheet sc-dlg sc-dlg-local">
           <h3>本地模型管理</h3>
-          <p class="tip">模型在你本机跑，照片不出电脑、不耗流量。运行库已内置，只要把 .gguf（和多模态要用的 mmproj）放进模型目录。</p>
+          <p class="tip">模型在你本机跑，照片不出电脑、不耗流量。Windows 版运行库已内置；macOS 把 llama.cpp 的 mac 包解压到 models/_runtime 就行（包里自带 llama-server）。模型只要把 .gguf（和多模态要用的 mmproj）放进模型目录。</p>
 
           <div class="sc-loc-row">
             <span class="sc-loc-k">本地推理运行库（llama.cpp）</span>
@@ -488,7 +491,7 @@
           <div class="sc-cfg-row"><label>图片边长</label><select id="scLocalSide">
             <option value="512">512</option><option value="640">640</option><option value="768">768</option>
           </select></div>
-          <p class="sc-tip" id="scLocalTip">运行库已内置（llama.cpp · Windows CPU 版），只需自己下 GGUF 主模型（+ 配套 mmproj）。点「打开」就能看到模型目录，复制进去后点「↻ 重新扫描」即可。</p>
+          <p class="sc-tip" id="scLocalTip">Windows 版运行库已内置；macOS 请把 llama.cpp 的 mac 包解压到 models/_runtime（里面自带 llama-server）。只需自己下 GGUF 主模型（+ 配套 mmproj），点「打开」就能看到模型目录。</p>
           <ul class="sc-links" id="scLocalLinks"></ul>
           <code class="sc-cmd" id="scLocalCmd"></code>
           <button id="scTestBtn2" class="ghost mini">测试连接</button>

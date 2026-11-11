@@ -3627,9 +3627,19 @@ async function handleScore(req, res, pathname, q) {
   // 浏览器压好图再传，服务端转发到云端 / 本地 llama-server，并把结果写回评分缓存
   if (pathname === '/api/score/ai/run' && req.method === 'POST') {
     const b = await readJson(req);
+    const cfg = SCORE.aiPublic();
+    // 本地引擎以「真正在跑的那个 llama-server」为准：设置里存的地址可能是上一次的端口，
+    // 端口漂移（18080 被占会往后顺延）或程序重启后没同步，请求就会打到空气里。
+    if (b.engine === 'local') {
+      const live = LLAMA.status();
+      if (live && live.running && live.baseUrl && (!cfg.local || cfg.local.baseUrl !== live.baseUrl)) {
+        cfg.local = { ...(cfg.local || {}), baseUrl: live.baseUrl };
+        try { SCORE.aiSet({ local: { baseUrl: live.baseUrl } }); } catch { /* 存不上不挡这次请求 */ }
+      }
+    }
     const r = await SCAI.run({
       engine: b.engine,
-      cfg: SCORE.aiPublic(),
+      cfg,
       key: SCORE.aiRaw().key,
       images: b.images || [],
       taxon: b.taxon,
@@ -3643,6 +3653,15 @@ async function handleScore(req, res, pathname, q) {
         entries[one.name] = r.strict ? { ai: one.ai, insect_strict: true } : { ai: one.ai };
       }
       if (Object.keys(entries).length) SCORE.put(dirOf(b.dir), entries);
+    }
+    // 相册照片（相册端）：结果按 photoId 合并进 remote 记录，不动本机目录的评分
+    if (b.remote && r.results) {
+      const patch = {};
+      for (const one of r.results) {
+        if (!one.ai || !one.name) continue;
+        patch[String(one.name)] = r.strict ? { ai: one.ai, insect_strict: true } : { ai: one.ai };
+      }
+      if (Object.keys(patch).length) SCORE.remoteAi(patch);
     }
     // 跑挂了也要把真实错误带出来：api() 抛错时只认顶层 error，而 SCAI.run 把错误
     // 放在 errors[] 里；不搬一层，前端就只能看到没用的「HTTP 200」。

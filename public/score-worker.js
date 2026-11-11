@@ -87,7 +87,8 @@ async function runScore(id, items, remote) {
 
 /** AI 用图：等比缩到 side，压成 JPEG data URL。这里可以用 drawImage，不要求像素级一致 */
 async function encodeOne(item, side) {
-  const url = `/img?path=${encodeURIComponent(item.path)}`;
+  // 本机照片走 /img?path=；相册照片已经在 /api/nat/img 代理上，直接用现成的 url
+  const url = item.url || `/img?path=${encodeURIComponent(item.path)}`;
   const px = await decode(url, 64 * 1024 * 1024);
   const s = Math.min(1, side / Math.max(px.sw, px.sh));
   const w = Math.max(1, Math.round(px.sw * s));

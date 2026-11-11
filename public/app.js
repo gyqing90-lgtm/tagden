@@ -253,8 +253,7 @@ function bindRailCollapse() {
   let saved = false;
   try { saved = localStorage.getItem(RAIL_KEY) === '1'; } catch {}
   setRailCollapsed(saved && !drawerNarrow());
-  if ($('railCollapse')) $('railCollapse').onclick = () => setRailCollapsed(true);
-  if ($('albumRailCollapse')) $('albumRailCollapse').onclick = () => setRailCollapsed(true);
+  if ($('railFold')) $('railFold').onclick = () => setRailCollapsed(true);
   if ($('railExpand')) $('railExpand').onclick = () => setRailCollapsed(false);
   window.addEventListener('resize', () => { if (drawerNarrow()) setRailCollapsed(false); });
 }
@@ -1318,11 +1317,35 @@ function bindGridEvents(grid, withFolders) {
 
 function closeNameEditor() {
   if (NAME_EDIT.onDoc && typeof document !== 'undefined') {
-    document.removeEventListener('click', NAME_EDIT.onDoc);
+    document.removeEventListener('click', NAME_EDIT.onDoc, true);
   }
   NAME_EDIT.onDoc = null;
   if (NAME_EDIT.box) NAME_EDIT.box.remove();
   NAME_EDIT.box = null;
+}
+
+/**
+ * 这次点击算不算「点在名字面板里」。
+ * 点候选按钮时，点击回调会先把那颗按钮从 DOM 里清掉，等事件冒泡到 document，
+ * e.target 已经和文档脱钩，box.contains(e.target) 会误判成「点在面板外面」把面板关掉，
+ * 所以再用 composedPath（派发那一刻就固定下来的路径）兜一层。
+ */
+function nameEditorHitsBox(box, e) {
+  if (!box) return false;
+  if (e && e.target && box.contains && box.contains(e.target)) return true;
+  const path = e && typeof e.composedPath === 'function' ? e.composedPath() : [];
+  return path.includes(box);
+}
+
+/** 面板变高（候选出来了）之后再看一眼窗口：底边要是超出去了就往上挪 */
+function clampNameEditorPos() {
+  const box = NAME_EDIT.box;
+  if (!box) return;
+  const vh = (typeof window !== 'undefined' && window.innerHeight) || 800;
+  const h = box.offsetHeight || 0;
+  if (!h) return;
+  const top = Number.parseFloat(box.style.top) || 12;
+  if (top + h > vh - 12) box.style.top = `${Math.max(12, vh - h - 12)}px`;
 }
 
 function neField(labelText, cls, value, placeholder) {
@@ -1517,8 +1540,14 @@ async function autoFillNames(cnInput, laInput, btn, msgEl, candEl) {
         neCandidates(candEl, hints, (pick) => {
           if (pick.cn) cnInput.value = pick.cn;
           if (pick.latin) laInput.value = pick.latin;
-          if (candEl) { candEl.innerHTML = ''; candEl.hidden = true; }
+          // 先只隐藏，等这次点击走完再清空：按钮在事件冒泡途中被移除，
+          // 外层的「点外面就关」判断会把它当成面板外的点击
+          if (candEl) {
+            candEl.hidden = true;
+            setTimeout(() => { if (candEl) candEl.innerHTML = ''; }, 0);
+          }
           say(`已选「${[pick.cn, pick.latin].filter(Boolean).join(' ')}」，可以直接保存`, 'ok');
+          clampNameEditorPos();
         });
       } else {
         say(it.note || '名录里没找到，请检查名字或手动填写', 'bad');
@@ -1529,6 +1558,7 @@ async function autoFillNames(cnInput, laInput, btn, msgEl, candEl) {
   } finally {
     btn.disabled = false;
     btn.textContent = label;
+    clampNameEditorPos();
   }
 }
 
@@ -1601,8 +1631,10 @@ function openNameEditor(p, anchor) {
   const r = anchor && anchor.getBoundingClientRect ? anchor.getBoundingClientRect() : { left: 24, bottom: 24 };
   const vw = (typeof window !== 'undefined' && window.innerWidth) || 1280;
   const vh = (typeof window !== 'undefined' && window.innerHeight) || 800;
+  // 候选一出来面板会变高，按真实高度卡一下，别让「保存」被顶到窗口外面
+  const bh = box.offsetHeight || 232;
   box.style.left = `${Math.max(12, Math.min(vw - 322, Number(r.left) || 12))}px`;
-  box.style.top = `${Math.max(12, Math.min(vh - 232, (Number(r.bottom) || 60) + 6))}px`;
+  box.style.top = `${Math.max(12, Math.min(Math.max(12, vh - bh - 12), (Number(r.bottom) || 60) + 6))}px`;
 
   cancel.onclick = closeNameEditor;
   save.onclick = () => saveNameEdit(p, f, cn.input, la.input, save);
@@ -1611,11 +1643,11 @@ function openNameEditor(p, anchor) {
     else if (e.key === 'Enter') saveNameEdit(p, f, cn.input, la.input, save);
   });
   NAME_EDIT.onDoc = (e) => {
-    if (NAME_EDIT.box && !NAME_EDIT.box.contains(e.target)) closeNameEditor();
+    if (!nameEditorHitsBox(NAME_EDIT.box, e)) closeNameEditor();
   };
   setTimeout(() => {
     if (NAME_EDIT.box === box && typeof document !== 'undefined') {
-      document.addEventListener('click', NAME_EDIT.onDoc);
+      document.addEventListener('click', NAME_EDIT.onDoc, true);
     }
   }, 0);
   if (cn.input.focus) cn.input.focus();
@@ -7894,10 +7926,12 @@ async function scLocalListRender() {
 function scSyncSel() {
   const n = SCR.sel.size;
   const alb = SCR.mode === 'album';
-  // AI 判别目前只压本机 /img 图，相册端先锁上；连拍分组、评分分组、搬文件夹同理
+  // 连拍分组、评分分组、搬文件夹只处理本机文件；AI 判别两边都能跑（相册照片走代理取图）
   if ($('scAiRunBtn')) {
-    $('scAiRunBtn').disabled = !n || SCR.running || alb;
-    $('scAiRunBtn').textContent = SCR.cfg && SCR.cfg.engine !== 'off' ? `AI 判别 ${n} 张` : 'AI 判别选中';
+    $('scAiRunBtn').disabled = SCR.running;
+    $('scAiRunBtn').textContent = SCR.cfg && SCR.cfg.engine !== 'off'
+      ? (n ? `AI 判别 ${n} 张` : 'AI 判别本层')
+      : 'AI 判别选中';
   }
   for (const id of ['scBurstBtn', 'scGroupBtn', 'scBelowGo', 'scBelowPick']) {
     const b = $(id);
@@ -8235,7 +8269,7 @@ function scDetailHtml(f, rec) {
     ? `<div class="q">${esc(aiLine)}</div>${ai.comment ? `<div class="cmt">${esc(ai.comment)}</div>` : ''}`
     : `<div class="q">还没做 AI 语义分析。</div>${SCR.aiErr
       ? `<div class="err">上次 AI 判别失败：${esc(SCR.aiErr)}</div>`
-      : '<div class="cmt">勾上「AI 语义评分」、选好引擎，勾选这张照片后点上面的「AI 判别」按钮，这里会给出对象/实际/主体/构图/鉴定部位和一句点评。</div>'}`}
+      : `<div class="cmt">勾上左边「AI 语义评分」再点「开始评分」，技术分算完会紧接着做 AI；也可以勾选照片后点「AI 判别」。这里会给出对象/实际/主体/构图/鉴定部位和一句点评。</div>`}`}
     </div>
     ${tags.length ? `<div class="sd-tags">${tags.map((t) => `<span>${esc(t)}</span>`).join('')}</div>` : ''}
     ${meta ? `<div class="sd-meta">${esc(meta)}</div>` : ''}`;
@@ -8408,7 +8442,11 @@ async function scRun() {
     return;
   }
   const todo = files.filter((f) => !SCR.scores[f.name] || SCR.scores[f.name].stale);
+  const aiOn = !!(SCR.cfg && SCR.cfg.engine !== 'off');
+  const aiNeed = aiOn ? files.filter((f) => !(SCR.scores[f.name] && SCR.scores[f.name].ai)) : [];
   if (!todo.length) {
+    // 勾了「AI 语义评分」但技术分早算过了：这一步就只补 AI，不要把人挡回去
+    if (aiNeed.length) return scAiRun(aiNeed);
     toast(picked.length
       ? `选中的 ${files.length} 张都评过了。想重评就先勾上它们点「清除评分」。`
       : '这个文件夹已经评过了。想重评就先点右上角「清除评分」。', 4000);
@@ -8419,6 +8457,7 @@ async function scRun() {
   scSyncSel();
   let pending = {};
   let failed = 0;
+  let nextAi = null;
   const flush = async (force) => {
     if (!Object.keys(pending).length) return;
     if (!force && Object.keys(pending).length < 20) return;
@@ -8441,6 +8480,8 @@ async function scRun() {
     if (r.error) toast('评分出错：' + r.error, 3600);
     await scLoad(SCR.dir);
     toast(`评分完成 ${Object.keys(r.entries).length} 张${failed ? `，跳过 ${failed} 张` : ''}${r.cancelled ? '（已停止）' : ''}`, 3000);
+    // 勾了「AI 语义评分」：技术分落盘后顺着把还没判别的补上，不用再手动点一次
+    if (!r.cancelled && aiNeed.length) nextAi = aiNeed;
   } catch (err) {
     toast('评分失败：' + err.message, 4000);
   } finally {
@@ -8448,6 +8489,7 @@ async function scRun() {
     scProgress(false);
     scSyncSel();
   }
+  if (nextAi) await scAiRun(nextAi);
 }
 
 /** 相册端评分：原图经本机代理取回，Worker 用 remote 模式算，分数按 photoId 落盘 */
@@ -8457,7 +8499,10 @@ async function scRunAlbum() {
   const files = picked.length ? picked : scFiles();
   if (!files.length) return toast('这个相册没有可评分的照片；先在左栏选一个相册', 3200);
   const todo = files.filter((f) => !SCR.scores[f.name] || SCR.scores[f.name].stale);
+  const aiOn = !!(SCR.cfg && SCR.cfg.engine !== 'off');
+  const aiNeed = aiOn ? files.filter((f) => !(SCR.scores[f.name] && SCR.scores[f.name].ai)) : [];
   if (!todo.length) {
+    if (aiNeed.length) return scAiRun(aiNeed);
     toast(picked.length
       ? `选中的 ${files.length} 张都评过了。想重评就先勾上它们点「清除评分」。`
       : '这一页都评过了。想重评就先点「清除评分」。', 4000);
@@ -8468,6 +8513,7 @@ async function scRunAlbum() {
   scProgress(true, 0, todo.length, `准备评分 ${todo.length} 张${picked.length ? '（只评勾选的）' : ''}…`);
   scSyncSel();
   let failed = 0;
+  let nextAi = null;
   try {
     const r = await scTask('remote', items, {}, (m) => {
       if (m.rec && m.key) {
@@ -8482,6 +8528,7 @@ async function scRunAlbum() {
     for (const it of items) if (!r.entries[it.key]) failed += 1;
     scRender();
     toast(`评分完成 ${Object.keys(r.entries).length} 张${failed ? `，跳过 ${failed} 张` : ''}${r.cancelled ? '（已停止）' : ''}`, 3000);
+    if (!r.cancelled && aiNeed.length) nextAi = aiNeed;
   } catch (err) {
     toast('评分失败：' + err.message, 4000);
   } finally {
@@ -8489,19 +8536,25 @@ async function scRunAlbum() {
     scProgress(false);
     scSyncSel();
   }
+  if (nextAi) await scAiRun(nextAi);
 }
 
-/** AI 判别：Worker 压图 → 服务端转发到云端 / 本地 llama-server → 结果写回评分缓存 */
-async function scAiRun() {
-  if (SCR.mode === 'album') { toast('AI 语义评分目前只支持本机端照片', 3000); return; }
+/**
+ * AI 判别：Worker 压图 → 服务端转发到云端 / 本地 llama-server → 结果写回评分缓存
+ * @param {Array} [targets] 指定要判别的文件；不给就按勾选 / 本层已评分的来
+ */
+async function scAiRun(targets) {
   if (SCR.running) { toast('上一个任务还在跑，等它结束再点', 2800); return; }
   if (!SCR.cfg || SCR.cfg.engine === 'off') {
     toast('先在页面上勾选「AI 语义评分」并选一个引擎', 3600);
     if ($('scAiOn')) $('scAiOn').focus();
     return;
   }
+  const album = SCR.mode === 'album';
   const picked = [...SCR.sel];
-  const files = scFiles().filter((f) => (picked.length ? picked.includes(f.path) : SCR.scores[f.name]));
+  const files = Array.isArray(targets) && targets.length
+    ? targets
+    : scFiles().filter((f) => (picked.length ? picked.includes(f.path) : SCR.scores[f.name]));
   if (!files.length) { toast(picked.length ? '选中的照片不在当前文件夹' : '先给这个文件夹评分，或勾选几张照片'); return; }
   const engine = SCR.cfg.engine;
   const set = engine === 'local' ? SCR.cfg.local : SCR.cfg.cloud;
@@ -8553,13 +8606,17 @@ async function scAiRun() {
   scProgress(true, 0, files.length, `准备压图 ${files.length} 张…`);
   scSyncSel();
   try {
-    const encOut = await scTask('encode', files.map((f) => ({ name: f.name, path: f.path })), { side }, (m) => {
+    const encOut = await scTask('encode', files.map((f) => (album
+      ? { name: f.name, url: f.url }
+      : { name: f.name, path: f.path })), { side }, (m) => {
       scProgress(true, m.done, m.total, `压图 ${m.done}/${m.total}`);
     });
     if (!encOut.images.length) { toast('没有能压成 JPEG 的图片', 3200); return; }
     scProgress(true, 0, encOut.images.length, `正在请求 ${engine === 'local' ? '本地模型' : '云端模型'}…`);
     const r = await post('/api/score/ai/run', {
-      dir: SCR.dir,
+      // 相册端没有本机目录：带着 remote 标记，服务端按 photoId 合并进 remote 记录
+      dir: album ? '' : SCR.dir,
+      remote: album,
       engine,
       images: encOut.images,
       taxon: set.taxon,
@@ -8871,11 +8928,13 @@ async function scLlamaStatus() {
     ? `运行中 · 端口 ${r.port}`
     : rt.kind === 'custom'
       ? '用户自带运行库（程序目录 llama/）'
-      : rt.kind === 'builtin'
-        ? '已内置 llama.cpp（Windows CPU 版）'
-        : rt.bundled
-          ? '已内置（首次启动时自动解压）'
-          : '未内置（Mac 请自行启动 llama-server 后填地址）';
+      : rt.kind === 'mac'
+        ? '已找到运行库（models/_runtime）'
+        : rt.kind === 'builtin'
+          ? '已内置 llama.cpp（Windows CPU 版）'
+          : rt.bundled
+            ? '已内置（首次启动时自动解压）'
+            : '没找到 llama-server（macOS 把 llama.cpp mac 包解压到 models/_runtime，或自己起服务后填地址）';
   el.className = `sc-runstate${kind}`;
   el.innerHTML = `<i class="dot"></i>${esc(txt)}`;
   if ($('scRunHint')) $('scRunHint').textContent = r.starting ? '正在加载模型…' : '';
