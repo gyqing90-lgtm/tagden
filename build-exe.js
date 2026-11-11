@@ -23,7 +23,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { execFileSync } = require('node:child_process');
+const { execFileSync, execSync } = require('node:child_process');
 const { buildBundle, SEA_ASSETS } = require('./build/bundle');
 const delta = require('./lib/delta');
 const { resolvePublicKey, fingerprint } = require('./build/signing');
@@ -124,6 +124,25 @@ function resolveNotes(argv) {
   } catch {
     return '';
   }
+}
+
+/**
+ * 可选 Windows Authenticode 签名：配置 TAGDEN_WIN_SIGN_CMD 后，在注入完成、算清单哈希之前签最终 exe。
+ * 命令里可用 {exe} 占位；不写占位就把 exe 路径追加到命令末尾。
+ * 例：TAGDEN_WIN_SIGN_CMD='signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /sha1 <指纹> {exe}'
+ * 没配置就照旧输出未签名 exe（SmartScreen 仍会提示）。
+ */
+function signWindowsExe(file) {
+  const cmd = String(process.env.TAGDEN_WIN_SIGN_CMD || '').trim();
+  if (!cmd) {
+    console.log('  [i] 未配置 TAGDEN_WIN_SIGN_CMD，输出未签名 exe');
+    return;
+  }
+  const quoted = `"${String(file).replace(/"/g, '\\"')}"`;
+  const line = cmd.includes('{exe}') ? cmd.split('{exe}').join(quoted) : `${cmd} ${quoted}`;
+  console.log('→ Windows Authenticode 签名');
+  execSync(line, { stdio: 'inherit', windowsHide: true });
+  console.log('  签名完成');
 }
 
 function main() {
@@ -257,6 +276,9 @@ function main() {
         `  多半是这个 exe 正在运行 —— 先关掉那个黑窗口（或任务管理器结束 物种标注工坊.exe）再打包。`,
     );
   }
+
+  // 必须在算 sha256 / 生成增量补丁之前签，否则清单里的哈希会对不上
+  signWindowsExe(exePath);
 
   const size = (fs.statSync(exePath).size / 1024 / 1024).toFixed(1);
   const digest = crypto.createHash('sha256').update(fs.readFileSync(exePath)).digest('hex');

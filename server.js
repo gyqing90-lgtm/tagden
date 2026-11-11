@@ -1679,7 +1679,7 @@ async function apiSpeciesComplete(body) {
     latin = latin.replace(/\s+/g, ' ').trim().slice(0, 160);
     const row = {
       key, fileName, cn, latin, fillCn: cn, fillLatin: latin,
-      state: '', source: '', candidates: [], note: '',
+      state: '', source: '', candidates: [], suggestions: [], note: '',
     };
     if (!cn && !latin) {
       row.state = 'empty';
@@ -1717,6 +1717,18 @@ async function apiSpeciesComplete(body) {
           if (hit && hit.spName) got = { state: 'filled', fillLatin: hit.spName, source: '自然在线分类库' };
         }
       }
+      if (!got && !latin) {
+        // 中文名可能是异名/错字：只在精确和联网都失败时，给编辑距离 1 的候选让人点选
+        const near = COLCN.suggestCn(cn, 6);
+        if (near.length) {
+          got = {
+            state: 'ambiguous',
+            candidates: [],
+            suggestions: near,
+            note: '名录里没有完全匹配，可能是异名/错字；从下面候选里选一个',
+          };
+        }
+      }
       got = got || {
         state: 'unresolved',
         note: latin ? '内置名录没有收录这个学名' : '内置名录里没有这个中文名',
@@ -1728,6 +1740,7 @@ async function apiSpeciesComplete(body) {
     row.state = got.state;
     row.source = got.source || '';
     row.candidates = got.candidates || [];
+    row.suggestions = got.suggestions || [];
     row.note = got.note || '';
     out.push(row);
   }

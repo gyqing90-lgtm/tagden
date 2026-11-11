@@ -1,0 +1,38 @@
+name: windows-smoke
+
+# 手动在 GitHub 的 Windows runner 上真实启动已发布 exe，检查版本、CSP 和已签名更新检查。
+# 覆盖「启动/更新链路」；删除/批量鉴定/自动识别仍需在带真实相册账号的 Windows 上人工点一遍。
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download latest Windows exe
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $base = 'https://bioidhub-fsw.oss-cn-hangzhou.aliyuncs.com/tagden'
+          $m = Invoke-RestMethod "$base/latest.json"
+          $v = [string]$m.version
+          $sha = [string]$m.sha256
+          Write-Host "latest=$v sha256=$sha"
+          Invoke-WebRequest "$base/tagden-win.exe" -OutFile "$PWD\tagden-win.exe"
+          Unblock-File -LiteralPath "$PWD\tagden-win.exe"
+          "TAGDEN_SMOKE_VERSION=$v" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "TAGDEN_SMOKE_SHA=$sha" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Run smoke
+        shell: pwsh
+        run: |
+          .\tools\smoke-win.ps1 `
+            -Exe .\tagden-win.exe `
+            -ExpectedVersion $env:TAGDEN_SMOKE_VERSION `
+            -ExpectedSha256 $env:TAGDEN_SMOKE_SHA

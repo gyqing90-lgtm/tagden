@@ -1220,11 +1220,29 @@ function neField(labelText, cls, value, placeholder) {
   return { wrap, input };
 }
 
+/** 把同义/错字候选渲染成可点的小按钮；点一下同时填中文名和拉丁名。 */
+function neCandidates(el, items, onPick) {
+  if (!el) return;
+  el.innerHTML = '';
+  const list = (Array.isArray(items) ? items : []).filter((x) => x && (x.cn || x.latin));
+  el.hidden = !list.length;
+  for (const it of list) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'ne-cand';
+    b.textContent = [it.cn, it.latin].filter(Boolean).join(' / ');
+    b.title = '点这个候选，填入中文名和拉丁名';
+    b.onclick = () => onPick(it);
+    el.appendChild(b);
+  }
+}
+
 /**
  * 自动补名字：用户只填中文名或只填学名时，从内置《中国生物物种名录》/ 自然在线分类库
  * 补另一侧。只补空着的一侧，不覆盖用户已经写的；两侧都填就不动。
+ * 查不到完全匹配时，把编辑距离 1 的异名/错字候选列出来让人点选。
  */
-async function autoFillNames(cnInput, laInput, btn, msgEl) {
+async function autoFillNames(cnInput, laInput, btn, msgEl, candEl) {
   const cn = String((cnInput && cnInput.value) || '').trim();
   const latin = String((laInput && laInput.value) || '').trim();
   const say = (text, cls) => {
@@ -1241,6 +1259,7 @@ async function autoFillNames(cnInput, laInput, btn, msgEl) {
     return;
   }
   if (!btn) return;
+  if (candEl) { candEl.innerHTML = ''; candEl.hidden = true; }
   const label = btn.textContent;
   btn.disabled = true;
   btn.textContent = '识别中…';
@@ -1259,11 +1278,23 @@ async function autoFillNames(cnInput, laInput, btn, msgEl) {
       say(`已从${from}补齐，可直接保存`, 'ok');
       if (!cn && laInput.focus) laInput.focus();
       else if (!latin && cnInput.focus) cnInput.focus();
-    } else if (it.state === 'ambiguous') {
-      const n = (it.candidates || []).length;
-      say(n ? `名录里有 ${n} 个同名候选，请手动选择` : (it.note || '名录里有多个同名，请手动填写'), 'bad');
     } else {
-      say(it.note || '名录里没找到，请检查名字或手动填写', 'bad');
+      const hints = Array.isArray(it.suggestions) && it.suggestions.length
+        ? it.suggestions
+        : (Array.isArray(it.candidates) && it.candidates.length && cn
+          ? it.candidates.map((x) => ({ cn, latin: String(x) }))
+          : []);
+      if (hints.length) {
+        say(it.note || '找到近似名字，请从下面候选里选一个', 'bad');
+        neCandidates(candEl, hints, (pick) => {
+          if (pick.cn) cnInput.value = pick.cn;
+          if (pick.latin) laInput.value = pick.latin;
+          if (candEl) { candEl.innerHTML = ''; candEl.hidden = true; }
+          say(`已选「${[pick.cn, pick.latin].filter(Boolean).join(' ')}」，可以直接保存`, 'ok');
+        });
+      } else {
+        say(it.note || '名录里没找到，请检查名字或手动填写', 'bad');
+      }
     }
   } catch (err) {
     say('自动识别失败：' + err.message, 'bad');
@@ -1314,7 +1345,11 @@ function openNameEditor(p, anchor) {
   autoRow.appendChild(autoBtn);
   autoRow.appendChild(autoMsg);
   box.appendChild(autoRow);
-  autoBtn.onclick = () => autoFillNames(cn.input, la.input, autoBtn, autoMsg);
+  const autoCands = document.createElement('div');
+  autoCands.className = 'ne-cands';
+  autoCands.hidden = true;
+  box.appendChild(autoCands);
+  autoBtn.onclick = () => autoFillNames(cn.input, la.input, autoBtn, autoMsg, autoCands);
   const tip = document.createElement('div');
   tip.className = 'ne-tip';
   tip.textContent = album
@@ -5422,7 +5457,9 @@ function nwOpen(opts) {
   $('nwLatin').value = '';
   $('nwKw').value = '';
   $('nwErr').textContent = '';
+  if ($('nwResult')) { $('nwResult').hidden = true; $('nwResult').textContent = ''; }
   if ($('nwAutoMsg')) $('nwAutoMsg').textContent = '';
+  if ($('nwAutoCands')) { $('nwAutoCands').innerHTML = ''; $('nwAutoCands').hidden = true; }
   $('nwClearLock').hidden = true;
   $('nwLocked').hidden = true;
   $('nwTaxaList').innerHTML = '<div class="empty">输入中文名或学名后点「检索」；留空则提交时按每张的名字自动匹配。</div>';
@@ -5492,6 +5529,7 @@ function nwSyncBatch() {
   const on = $('nwBatch').checked;
   $('nwBatchBox').hidden = !on;
   if ($('nwAutoMsg')) $('nwAutoMsg').hidden = !on;
+  if ($('nwAutoCands')) $('nwAutoCands').hidden = true;
   document.querySelector('.sheet.nw').classList.toggle('batch', on);
   if (on && !$('nwChinese').value && !$('nwLatin').value) {
     const first = NW.rows.find((r) => r.checked) || NW.rows[0];
@@ -5673,6 +5711,14 @@ async function nwSubmit() {
   renderNatPhotos();
   const okN = rows.filter((r) => r.status === 'ok').length;
   const failN = rows.length - okN;
+  const resultEl = $('nwResult');
+  if (resultEl) {
+    resultEl.hidden = false;
+    resultEl.className = `nw-result ${failN ? 'bad' : 'ok'}`;
+    resultEl.textContent = failN
+      ? `完成：成功 ${okN} 张，失败 ${failN} 张；失败原因见每张照片下方的红字。`
+      : `完成：${okN} 张全部成功。`;
+  }
   // 把提交结果回写本机待上传记录：成功标记 done，失败留 failed 下次可重试
   if (records.length) {
     const recs = NW.rows.map((r) => ({
@@ -5723,7 +5769,7 @@ function nwBind() {
   if ($('tagBatchBtn')) $('tagBatchBtn').onclick = nwOpenBatch;
   if ($('natBatchBtn')) $('natBatchBtn').onclick = nwOpenBatch;
   if ($('natDelBtn')) $('natDelBtn').onclick = natDeleteSelected;
-  if ($('nwAutoBtn')) $('nwAutoBtn').onclick = () => autoFillNames($('nwChinese'), $('nwLatin'), $('nwAutoBtn'), $('nwAutoMsg'));
+  if ($('nwAutoBtn')) $('nwAutoBtn').onclick = () => autoFillNames($('nwChinese'), $('nwLatin'), $('nwAutoBtn'), $('nwAutoMsg'), $('nwAutoCands'));
   if ($('natReIdShortcut')) $('natReIdShortcut').onclick = nwOpenReId;
   $('nwCancel').onclick = nwClose;
   $('nwBatch').onchange = nwSyncBatch;
@@ -5962,17 +6008,61 @@ async function natHandlePathsDrop(paths, target) {
   }
 }
 
+function natCsvCell(v) {
+  return `"${String(v == null ? '' : v).replace(/"/g, '""')}"`;
+}
+
+/** 删除前先导出一份所选照片的元数据 CSV，至少留个底；浏览器不支持下载时静默跳过。 */
+function natExportDeleteBackup(ids) {
+  try {
+    const want = new Set((ids || []).map(String));
+    const list = (NAT.photos || []).filter((p) => want.has(String(p.photoId)));
+    if (!list.length) return;
+    const cols = ['photoId', 'fileName', '中文名', '学名', '日期', '地点', '相册'];
+    const lines = [cols.map(natCsvCell).join(',')];
+    for (const p of list) {
+      lines.push([
+        p.photoId, p.fileName || p.name || '', p.cname || '', p.lname || '',
+        p.date || '', p.place || '', (NAT.album && NAT.album.title) || '',
+      ].map(natCsvCell).join(','));
+    }
+    if (typeof Blob !== 'function' || !window.URL || typeof window.URL.createObjectURL !== 'function') return;
+    const blob = new Blob(['\uFEFF' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
+    const a = document.createElement('a');
+    const stamp = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15);
+    a.href = window.URL.createObjectURL(blob);
+    a.download = `tagden-删除备份-${stamp}.csv`;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => { try { window.URL.revokeObjectURL(a.href); } catch { /* 忽略 */ } }, 1200);
+  } catch {
+    /* 备份失败不阻断删除，但删除前仍有确认框 */
+  }
+}
+
 /**
  * 删除自然在线相册里勾选的照片：站点原生删除，原图一起消失，确认后才发。
- * 删当前页最后几张时把页码收回来，避免停在空页。
+ * 删当前页最后几张时把页码收回来，避免停在空页。5 张以上要求输入「删除」。
  */
 async function natDeleteSelected() {
   if (!NAT.loggedIn) return toast('先在「自然在线」页登录');
   const ids = [...NAT.sel];
   if (!ids.length) return toast('先勾选要删除的照片');
-  if (!window.confirm(`删除勾选的 ${ids.length} 张照片？\n会同步删除自然在线上的原图，删后不能恢复。`)) return;
+  const tip = `会同步删除自然在线上的原图，删后不能恢复。`;
+  if (ids.length >= 5) {
+    const typed = window.prompt(`即将删除 ${ids.length} 张照片。\n${tip}\n\n确认请输入「删除」两个字：`, '');
+    if (String(typed || '').trim() !== '删除') return toast('已取消删除');
+  } else if (!window.confirm(`删除勾选的 ${ids.length} 张照片？\n${tip}`)) {
+    return;
+  }
+  natExportDeleteBackup(ids);
   try {
     const r = await post('/api/nat/photos/delete', { ids });
+    const done = Number(r.deleted);
+    const n = Number.isFinite(done) ? done : ids.length;
+    const left = Math.max(0, ids.length - n);
     NAT.sel.clear();
     await natLoadAlbums();
     if (NAT.album) {
@@ -5984,7 +6074,12 @@ async function natDeleteSelected() {
       }
     }
     natSyncSel();
-    toast(`已删除 ${r.deleted != null ? r.deleted : ids.length} 张，并同步到自然在线`, 3200);
+    toast(
+      left
+        ? `已删除 ${n} 张，${left} 张站点未删除（可能不是本人上传），备份 CSV 已下载`
+        : `已删除 ${n} 张，并同步到自然在线；备份 CSV 已下载`,
+      3800,
+    );
   } catch (err) {
     toast('删除失败：' + err.message, 4200);
   }
