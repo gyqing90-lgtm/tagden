@@ -370,9 +370,23 @@ function renderChips() {
   });
   parts.push(`<span class="chip count" title="当前参与识别的模型数量">共 ${on.size} 站</span>`);
   $('engineChips').innerHTML = parts.join('');
+  const btn = $('engineBtn');
+  if (btn) {
+    btn.textContent = `识别源 ${on.size}/${avail.length}`;
+    btn.title = `当前启用 ${on.size} 个识别源；点开可勾选/取消`;
+  }
 }
 
 function bindEngineChips() {
+  if ($('engineBtn')) {
+    $('engineBtn').onclick = (e) => {
+      e.stopPropagation();
+      $('engineChips').classList.toggle('open');
+    };
+  }
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest || !e.target.closest('.engine-wrap')) $('engineChips').classList.remove('open');
+  });
   $('engineChips').onclick = async (e) => {
     const b = e.target.closest('button.chip[data-site]');
     if (!b || b.disabled) return;

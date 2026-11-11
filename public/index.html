@@ -23,19 +23,22 @@
   </div>
 
   <div class="right">
-    <span id="engineChips" class="chips"></span>
+    <div class="engine-wrap">
+      <button id="engineBtn" class="ghost mini" type="button" title="展开/收起识别源开关">识别源</button>
+      <span id="engineChips" class="chips"></span>
+    </div>
     <button id="cfgMigrateBtn" class="ghost mini" title="导出/导入账号、API Key、界面设置（口令加密）">配置迁移</button>
     <button id="authorBtn" class="ghost mini" title="用着不顺手、想要个新功能，直接找作者">联系作者</button>
   </div>
 </header>
 
 <nav class="tabs" id="tabs">
-  <button class="tab on" data-tab="annotate">标注</button>
-  <button class="tab" data-tab="stats" title="统计当前文件夹及其子文件夹下所有已鉴定物种">统计分析</button>
-  <button class="tab" data-tab="archive" title="把散落在各个文件夹里的图片按 界/门/纲/目/科/属 归并到同一个总文件夹">按分类归档</button>
-  <button class="tab" data-tab="nature" title="自然在线账号里的相册：把这里标好的图传上去，或者把账号里的图拉回来">自然在线</button>
-  <button class="tab" data-tab="score" title="照片技术评分：清晰度、焦点、曝光、连拍分组、选片；可接云端或本地大模型做 AI 判别">照片评分</button>
-  <button class="tab" data-tab="library" title="给一个根文件夹建索引，跨子文件夹搜索物种/文件名，并查找内容完全相同的重复图片">图库管理</button>
+  <button class="tab on" data-tab="annotate"><svg class="tab-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12l-8 8-8-8V4h8z"/><path d="M8 8h.01"/></svg><span>标注</span></button>
+  <button class="tab" data-tab="stats" title="统计当前文件夹及其子文件夹下所有已鉴定物种"><svg class="tab-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V9M10 19V5M16 19v-7M22 19H2"/></svg><span>统计分析</span></button>
+  <button class="tab" data-tab="archive" title="把散落在各个文件夹里的图片按 界/门/纲/目/科/属 归并到同一个总文件夹"><svg class="tab-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span>按分类归档</span></button>
+  <button class="tab" data-tab="nature" title="自然在线账号里的相册：把这里标好的图传上去，或者把账号里的图拉回来"><svg class="tab-ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M4 12h16M12 4c2.5 2.5 2.5 11 0 16M12 4c-2.5 2.5-2.5 11 0 16"/></svg><span>自然在线</span></button>
+  <button class="tab" data-tab="score" title="照片技术评分：清晰度、焦点、曝光、连拍分组、选片；可接云端或本地大模型做 AI 判别"><svg class="tab-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-2.9-5.6 2.9 1.1-6.2L3 9.6l6.2-.9z"/></svg><span>照片评分</span></button>
+  <button class="tab" data-tab="library" title="给一个根文件夹建索引，跨子文件夹搜索物种/文件名，并查找内容完全相同的重复图片"><svg class="tab-ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="7" height="7" rx="1"/><rect x="14" y="4" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg><span>图库管理</span></button>
 </nav>
 
 <div class="upbar" id="upbar" hidden>
@@ -81,16 +84,22 @@
           <button data-f="done">已标注</button>
           <button data-f="cand">有候选</button>
         </div>
-        <button id="selAll" class="ghost">全选未标注</button>
-        <button id="selNone" class="ghost">清空</button>
-        <button id="undoBtn" class="ghost" hidden title="撤销上一次本机写标签 / 重命名">撤销</button>
-        <button id="exportBtn" class="ghost" title="导出带拍摄时间和经纬度的标注明细、物种清单">导出清单</button>
-        <button id="toScoreBtn" class="ghost" title="给当前这个文件夹的照片打技术分，按星级挑片，可再送去标注或传到自然在线">照片评分</button>
-        <button id="nameCheckBtn" class="ghost" title="只有中文名或只有学名的照片，用内置《中国生物物种名录》把另一侧补齐；确认后才写回">物种名核对</button>
-        <button id="pasteBtn" class="ghost" title="不用打开文件夹：Ctrl+V 粘贴一张图、或直接拖进来，立刻看多站识别结果">粘贴单图识别</button>
-        <!-- 相册端专用：对勾选的多张站点照片统一赋一个名字，一次提交鉴定（只传名字，不传图片） -->
-        <button id="tagBatchBtn" class="ghost" hidden title="相册端批量鉴定：对勾选的照片统一赋一个名字，一次写回自然在线（只传鉴定结果，不传图片）">批量鉴定</button>
-        <button id="runBtn" class="primary" disabled>识别选中 <b id="selCount">0</b></button>
+        <div class="tool-group">
+          <button id="selAll" class="ghost">全选未标注</button>
+          <button id="selNone" class="ghost">清空</button>
+          <button id="undoBtn" class="ghost" hidden title="撤销上一次本机写标签 / 重命名">撤销</button>
+        </div>
+        <details class="more-tools">
+          <summary class="ghost mini">更多</summary>
+          <div class="more-menu">
+            <button id="exportBtn" class="ghost" title="导出带拍摄时间和经纬度的标注明细、物种清单">导出清单</button>
+            <button id="toScoreBtn" class="ghost" title="给当前这个文件夹的照片打技术分，按星级挑片，可再送去标注或传到自然在线">照片评分</button>
+            <button id="nameCheckBtn" class="ghost" title="只有中文名或只有学名的照片，用内置《中国生物物种名录》把另一侧补齐；确认后才写回">物种名核对</button>
+            <button id="pasteBtn" class="ghost" title="不用打开文件夹：Ctrl+V 粘贴一张图、或直接拖进来，立刻看多站识别结果">粘贴单图识别</button>
+            <button id="tagBatchBtn" class="ghost" hidden title="相册端批量鉴定：对勾选的照片统一赋一个名字，一次写回自然在线（只传鉴定结果，不传图片）">批量鉴定</button>
+          </div>
+        </details>
+        <button id="runBtn" class="primary" title="识别当前勾选或当前这一页">识别选中 <b id="selCount">0</b></button>
       </div>
     </div>
 
