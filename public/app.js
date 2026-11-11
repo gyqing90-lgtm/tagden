@@ -218,6 +218,73 @@ async function pickStartDir() {
   return cands[0] || last;
 }
 
+/* ---------------- 主题 / 窄屏抽屉 ---------------- */
+
+const THEME_KEY = 'tagden-theme';
+function applyTheme(theme) {
+  const dark = theme === 'dark';
+  document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
+  const b = $('themeBtn');
+  if (b) {
+    b.title = dark ? '切换为浅色' : '切换为深色';
+    b.setAttribute('aria-pressed', dark ? 'true' : 'false');
+    b.innerHTML = dark
+      ? '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>'
+      : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4 7 7 0 1 0 20 14.5z"/></svg>';
+  }
+  try { localStorage.setItem(THEME_KEY, dark ? 'dark' : 'light'); } catch {}
+}
+function bindTheme() {
+  let saved = 'light';
+  try { saved = localStorage.getItem(THEME_KEY) || (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'); } catch {}
+  applyTheme(saved);
+  if ($('themeBtn')) $('themeBtn').onclick = () => applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
+}
+
+function drawerNarrow() {
+  return window.matchMedia && window.matchMedia('(max-width: 1180px)').matches;
+}
+function setDrawer(which, open) {
+  const lay = document.querySelector('.layout');
+  if (!lay) return;
+  lay.classList.toggle(which === 'rail' ? 'rail-open' : 'panel-open', Boolean(open));
+  const scrim = $('drawerScrim');
+  if (scrim) scrim.hidden = !lay.classList.contains('rail-open') && !lay.classList.contains('panel-open');
+}
+function closeDrawers() {
+  const lay = document.querySelector('.layout');
+  if (lay) lay.classList.remove('rail-open', 'panel-open');
+  if ($('drawerScrim')) $('drawerScrim').hidden = true;
+}
+function syncDrawerButtons(tab) {
+  const wide = !drawerNarrow();
+  for (const id of ['railToggle', 'panelToggle']) {
+    const b = $(id);
+    if (!b) continue;
+    b.hidden = wide || (id === 'panelToggle' && tab !== 'annotate');
+  }
+}
+function bindDrawers() {
+  if ($('railToggle')) $('railToggle').onclick = () => setDrawer('rail', !document.querySelector('.layout').classList.contains('rail-open'));
+  if ($('panelToggle')) $('panelToggle').onclick = () => setDrawer('panel', !document.querySelector('.layout').classList.contains('panel-open'));
+  if ($('panelClose')) $('panelClose').onclick = () => setDrawer('panel', false);
+  if ($('drawerScrim')) $('drawerScrim').onclick = closeDrawers;
+  window.addEventListener('resize', () => {
+    if (!drawerNarrow()) closeDrawers();
+    syncDrawerButtons(S.tab);
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeDrawers();
+  });
+  syncDrawerButtons(S.tab);
+  // 图片加载完隐藏缩略图骨架
+  document.addEventListener('load', (e) => {
+    const img = e.target;
+    if (img && img.tagName === 'IMG' && img.closest && img.closest('.thumb')) img.classList.add('loaded');
+  }, true);
+}
+
 async function boot() {
   try {
     S.state = await api('/api/state');
@@ -225,6 +292,8 @@ async function boot() {
     document.body.innerHTML = `<div style="padding:40px;font:14px/1.7 'Microsoft YaHei'">连不上本机服务：${esc(err.message)}<br>请在项目目录里运行 <code>node server.js</code></div>`;
     return;
   }
+  bindTheme();
+  bindDrawers();
   renderPresets();
   renderChips();
   renderPlaces();
@@ -699,6 +768,7 @@ async function loadDir(dir) {
     SCR.bursts = null;
     SCR.groupMode = false;
     if (S.tab === 'score') scoreOpen();
+    closeDrawers();
     refreshUndo();
   } catch (err) {
     toast(err.message);
@@ -2407,6 +2477,7 @@ function panelSwapDraft(p) {
 }
 
 function openPanel(p) {
+  if (drawerNarrow()) setDrawer('panel', true);
   // 相册照片（nat:<photoId>）走相册端的面板：图片、各站、候选、写回
   if (isNatKey(p)) return openAlbumPanel(p);
   const f = S.files.find((x) => x.path === p);
@@ -4615,6 +4686,8 @@ function bindLibrary() {
 
 function showTab(name) {
   S.tab = name;
+  closeDrawers();
+  syncDrawerButtons(name);
   // 归档 / 统计 / 自然在线页：进页面就回到本机端（切走后不会自动跳回相册端）
   if (syncSrcAvailability(name) && S.mode === 'album') setSource('local', { quiet: true });
   const lay = document.querySelector('.layout');
@@ -4822,7 +4895,17 @@ function renderStats(d) {
     ['门', L['门'], ''],
     ['界', L['界'], ''],
   ];
-  let html = '<div class="st-kpis">';
+  const pct = d.total ? Math.max(0, Math.min(100, Math.round(((L['已鉴定'] || 0) / d.total) * 100))) : 0;
+  let html = `<div class="st-summary">
+    <div class="st-donut" style="--pct:${pct}%"><div><b>${pct}%</b><span>已鉴定</span></div></div>
+    <div class="st-summary-cards">
+      <div><b>${d.total || 0}</b><span>总照片</span></div>
+      <div><b>${L['已鉴定'] || 0}</b><span>已识别</span></div>
+      <div><b>${L['种'] || 0}</b><span>物种</span></div>
+      <div><b>${L['未鉴定'] || 0}</b><span>未识别</span></div>
+    </div>
+  </div>`;
+  html += '<div class="st-kpis">';
   for (const [label, n, cls] of kpis) html += `<div class="kpi ${cls}"><b>${n || 0}</b><span>${label}</span></div>`;
   html += '</div>';
 
@@ -7743,6 +7826,7 @@ function scSyncSel() {
   if ($('scSelAll')) $('scSelAll').disabled = SCR.running || onPage === 0 || n >= onPage;
   if ($('scSelNone')) $('scSelNone').disabled = SCR.running || n === 0;
   if ($('scSelInfo')) $('scSelInfo').textContent = n ? `已选 ${n} 张` : '';
+  if ($('scCompareBtn')) $('scCompareBtn').disabled = n !== 2 || SCR.running;
   // 按钮上直接写清楚这次会动几张：勾了就是勾的数量，没勾就是整层
   if ($('scRunBtn')) $('scRunBtn').textContent = n ? `开始评分 ${n} 张` : '开始评分';
   if ($('scClearBtn')) $('scClearBtn').textContent = n ? `清除 ${n} 张` : '清除评分';
@@ -8072,6 +8156,28 @@ function scDetailHtml(f, rec) {
     </div>
     ${tags.length ? `<div class="sd-tags">${tags.map((t) => `<span>${esc(t)}</span>`).join('')}</div>` : ''}
     ${meta ? `<div class="sd-meta">${esc(meta)}</div>` : ''}`;
+}
+
+function scCompareOpen() {
+  const files = scFiles().filter((f) => SCR.sel.has(f.path)).slice(0, 2);
+  if (files.length !== 2) return toast('先勾选正好两张照片，再点对比', 2600);
+  const body = $('scCompareBody');
+  if (!body) return;
+  body.innerHTML = files.map((f) => {
+    const rec = SCR.scores[f.name] || null;
+    const src = f.thumbUrl || `/img?path=${enc(f.path)}&thumb=1`;
+    const nm = f.display || f.name;
+    return `<div class="sc-cmp-pane">
+      <div class="sc-cmp-img"><img loading="lazy" decoding="async" src="${esc(src)}" alt=""></div>
+      <h4 title="${esc(nm)}">${esc(nm)}</h4>
+      ${scDetailHtml(f, rec)}
+    </div>`;
+  }).join('');
+  $('scCompareMask').classList.add('show');
+}
+function scCompareClose() {
+  const m = $('scCompareMask');
+  if (m) m.classList.remove('show');
 }
 
 function scDetailOpen(path) {
@@ -9069,6 +9175,9 @@ function bindScore() {
   $('scSortSel').onchange = () => { SCR.sort = $('scSortSel').value; scRender(); };
   $('scBurstBtn').onclick = scBursts;
   $('scGroupBtn').onclick = scGroupToggle;
+  if ($('scCompareBtn')) $('scCompareBtn').onclick = scCompareOpen;
+  if ($('scCompareX')) $('scCompareX').onclick = scCompareClose;
+  if ($('scCompareMask')) $('scCompareMask').onclick = (e) => { if (e.target === $('scCompareMask')) scCompareClose(); };
   $('scGroupLevels').onchange = scGroupsRender;
   $('scGroupReload').onclick = scGroupsRender;
   $('scGroupList').onclick = scGroupListClick;
@@ -9120,6 +9229,7 @@ function bindScore() {
   // 详情抽屉：Esc 关；点空白处（既不在抽屉里，也不是照片卡片）也关
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
+    if ($('scCompareMask') && $('scCompareMask').classList.contains('show')) { scCompareClose(); return; }
     if (scDlgShown('scLocalMask')) { scCloseDlg('scLocalMask'); return; }
     if (scDlgShown('scKeyMask')) { scCloseDlg('scKeyMask'); return; }
     if (SCR.detail) scDetailClose();

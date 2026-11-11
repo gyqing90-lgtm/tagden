@@ -8,6 +8,7 @@
 </head>
 <body>
 <header class="top">
+  <button id="railToggle" class="ghost mini drawer-btn" type="button" title="显示/隐藏文件夹栏">文件夹</button>
   <div class="brand">
     <span class="logo">标</span>
     <div>
@@ -23,6 +24,7 @@
   </div>
 
   <div class="right">
+    <button id="themeBtn" class="ghost mini icon-only" type="button" title="切换深色/浅色"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4 7 7 0 1 0 20 14.5z"/></svg></button>
     <div class="engine-wrap">
       <button id="engineBtn" class="ghost mini" type="button" title="展开/收起识别源开关">识别源</button>
       <span id="engineChips" class="chips"></span>
@@ -295,6 +297,7 @@
         <span class="sc-selinfo" id="scSelInfo"></span>
         <button id="scBurstBtn" class="ghost mini" title="把连拍/重复的照片折叠成一组，只留封面">连拍分组</button>
         <button id="scGroupBtn" class="ghost mini" title="照原版评分器的分组页：按 3/5/10 级把已评分的照片分成一组一组看，还能把低分组整体搬到别的文件夹">评分分组</button>
+        <button id="scCompareBtn" class="ghost mini" disabled title="勾选两张照片，并排对比技术分、AI 分和各评分点">对比选中</button>
         <button id="scClearBtn" class="ghost mini" title="清除评分：勾了就只清勾选的那几张，没勾清整个文件夹（照片本身不动）">清除评分</button>
         <button id="scRunBtn" class="primary mini" title="开始评分：勾了就只评勾选的那几张，没勾评整个文件夹">开始评分</button>
       </div>
@@ -531,8 +534,10 @@
       </div>
     </div><!-- /libraryView -->
   </main>
+  <button id="panelToggle" class="ghost mini panel-toggle drawer-btn" type="button" title="显示/隐藏详情面板">详情</button>
 
   <aside class="panel" id="panel">
+    <button id="panelClose" class="drawer-close" type="button" title="关闭详情">×</button>
     <div class="panel-empty" id="panelEmpty">
       <p>点左边任意一张图</p>
       <p class="dim">右侧会出现候选物种，选中一个就能写回图片</p>
@@ -818,6 +823,14 @@
   </div>
 </div>
 
+<!-- 评分对比：两张照片并排看 -->
+<div class="mask" id="scCompareMask">
+  <div class="sheet sc-compare">
+    <div class="sc-compare-head"><h3>照片对比</h3><button id="scCompareX" class="drawer-close" type="button" title="关闭">×</button></div>
+    <div class="sc-compare-body" id="scCompareBody"></div>
+  </div>
+</div>
+
 <!-- 配置迁移：账号/Key/界面设置口令加密导出，换电脑时导入 -->
 <div class="mask" id="cfgMigrateMask">
   <div class="sheet cfg-migrate">
@@ -835,6 +848,8 @@
     <div class="sheet-actions"><button id="cfgClose" class="ghost">关闭</button></div>
   </div>
 </div>
+
+<div id="drawerScrim" class="drawer-scrim" hidden></div>
 
 <script src="/app.js"></script>
 </body>
