@@ -24,6 +24,7 @@
 
   <div class="right">
     <span id="engineChips" class="chips"></span>
+    <button id="cfgMigrateBtn" class="ghost mini" title="导出/导入账号、API Key、界面设置（口令加密）">配置迁移</button>
     <button id="authorBtn" class="ghost mini" title="用着不顺手、想要个新功能，直接找作者">联系作者</button>
   </div>
 </header>
@@ -82,6 +83,7 @@
         </div>
         <button id="selAll" class="ghost">全选未标注</button>
         <button id="selNone" class="ghost">清空</button>
+        <button id="undoBtn" class="ghost" hidden title="撤销上一次本机写标签 / 重命名">撤销</button>
         <button id="exportBtn" class="ghost" title="导出带拍摄时间和经纬度的标注明细、物种清单">导出清单</button>
         <button id="toScoreBtn" class="ghost" title="给当前这个文件夹的照片打技术分，按星级挑片，可再送去标注或传到自然在线">照片评分</button>
         <button id="nameCheckBtn" class="ghost" title="只有中文名或只有学名的照片，用内置《中国生物物种名录》把另一侧补齐；确认后才写回">物种名核对</button>
@@ -199,6 +201,15 @@
           <div class="nat-photos-bar">
             <span class="nat-album-name" id="natAlbumName">选右边的相册看照片</span>
             <span class="nat-selinfo" id="natSelInfo"></span>
+            <span class="nat-filter">
+              <input id="natFilterQ" type="text" spellcheck="false" placeholder="本页筛选：物种 / 文件名">
+              <select id="natFilterSel" title="按名称状态筛选当前页">
+                <option value="all">全部</option>
+                <option value="latin">有学名</option>
+                <option value="nolatin">无学名</option>
+              </select>
+            </span>
+            <span class="nat-selinfo" id="natFilterInfo"></span>
             <span class="nat-drag-hint" id="natDragHint" hidden>拖照片 / 子文件夹到右边相册即可上传</span>
             <span class="nat-acts" id="natSelActs">
               <button id="natSelAll" class="ghost mini" title="勾上当前这一屏的所有照片（本机＝当前文件夹，相册＝当前这一页）" disabled>全选</button>
@@ -498,6 +509,7 @@
           </select>
           <button id="libSearchBtn" class="ghost mini">搜索</button>
           <button id="libDupBtn" class="ghost mini" title="按文件大小 + SHA-256 找内容完全相同的图片">查找重复文件</button>
+          <button id="libSimBtn" class="ghost mini" title="对当前搜索结果计算 dHash，找视觉上相似的照片（压缩/裁剪后也能找到）">查找相似图片</button>
           <span id="libStat" class="lib-stat"></span>
         </div>
       </div>
@@ -506,6 +518,7 @@
         <div class="lib-more" id="libMoreBox" hidden><button id="libMoreBtn" class="ghost mini">加载更多</button></div>
         <div id="libEmpty" class="empty" hidden></div>
         <div id="libDup" class="lib-dup" hidden></div>
+        <div id="libSim" class="lib-dup" hidden></div>
       </div>
     </div><!-- /libraryView -->
   </main>
@@ -793,6 +806,24 @@
       <img id="zoomImg" alt="" draggable="false">
     </div>
     <div class="zoom-foot">滚轮缩放 · 按住拖动平移 · 双击放大/复位 · ← → 翻本层的上一张/下一张 · Esc 关闭</div>
+  </div>
+</div>
+
+<!-- 配置迁移：账号/Key/界面设置口令加密导出，换电脑时导入 -->
+<div class="mask" id="cfgMigrateMask">
+  <div class="sheet cfg-migrate">
+    <h3>配置迁移</h3>
+    <p class="tip">导出内容包含各站点账号、API Key、界面设置；文件用口令加密，口令不会保存。导入会覆盖当前配置，并自动备份原 config.json。</p>
+    <label class="cfg-pass">口令（至少 4 位）
+      <input id="cfgPass" type="password" autocomplete="new-password" spellcheck="false" placeholder="自己设一个临时口令">
+    </label>
+    <div class="cfg-actions">
+      <button id="cfgExportBtn" class="primary">导出加密配置</button>
+      <label class="ghost mini cfg-file">选择备份文件<input id="cfgFile" type="file" accept=".json,.tagden,application/json"></label>
+      <button id="cfgImportBtn" class="ghost">导入并覆盖</button>
+    </div>
+    <div class="cfg-msg" id="cfgMigrateMsg"></div>
+    <div class="sheet-actions"><button id="cfgClose" class="ghost">关闭</button></div>
   </div>
 </div>
 

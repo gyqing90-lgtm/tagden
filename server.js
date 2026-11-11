@@ -89,6 +89,7 @@ const THUMBS = path.join(CACHE, 'thumbs');
 // 浏览器把本机文件夹拖进来时，文件先落在这儿，再交给上传任务；跑完就删
 const NAT_DROP = path.join(CACHE, 'nature-drop');
 const CFG_FILE = path.join(DATA, 'config.json');
+const UNDO_FILE = path.join(DATA, 'undo.json');
 // 本机日志：双击 exe 时控制台会一闪而过，崩溃/接口错误只能靠这个排查。
 // 只记版本、路径和异常，不记账号、令牌和请求体。
 const LOG_DIR = path.join(DATA, 'logs');
@@ -1403,6 +1404,180 @@ async function identifyImage({ buffer, mime, filename, small, jpeg, sources, for
   return out;
 }
 
+/* ---------------- 配置导出 / 导入（口令加密） ----------------
+ * 只导出「账号、Key、界面设置」，不含自然在线令牌缓存/识别缓存/日志。
+ * 文件用 scrypt + AES-256-GCM 加密，口令不落盘；导入前自动备份当前 config.json。
+ */
+function configForExport() {
+  return {
+    sites: config.sites || {},
+    sessions: config.sessions || {},
+    ui: config.ui || {},
+    deepseek: config.deepseek || {},
+    seedXingsePurged: config.seedXingsePurged === true,
+  };
+}
+
+function configEnvelope(passphrase) {
+  const pass = String(passphrase || '');
+  if (pass.length < 4) throw bad('口令至少 4 个字符');
+  const salt = crypto.randomBytes(16);
+  const iv = crypto.randomBytes(12);
+  const key = crypto.scryptSync(pass, salt, 32, { N: 16384, r: 8, p: 1, maxmem: 64 * 1024 * 1024 });
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const plain = Buffer.from(JSON.stringify({
+    app: 'tagden',
+    version: VERSION,
+    exportedAt: Date.now(),
+    config: configForExport(),
+  }), 'utf8');
+  const data = Buffer.concat([cipher.update(plain), cipher.final()]);
+  return {
+    v: 1,
+    app: 'tagden',
+    kdf: 'scrypt',
+    salt: salt.toString('base64'),
+    iv: iv.toString('base64'),
+    tag: cipher.getAuthTag().toString('base64'),
+    data: data.toString('base64'),
+  };
+}
+
+function openConfigEnvelope(envelope, passphrase) {
+  const env = typeof envelope === 'string' ? JSON.parse(envelope) : envelope;
+  if (!env || env.v !== 1 || env.app !== 'tagden' || env.kdf !== 'scrypt') throw bad('不是本程序的配置备份文件');
+  const pass = String(passphrase || '');
+  if (pass.length < 4) throw bad('口令至少 4 个字符');
+  let plain;
+  try {
+    const salt = Buffer.from(String(env.salt || ''), 'base64');
+    const iv = Buffer.from(String(env.iv || ''), 'base64');
+    const tag = Buffer.from(String(env.tag || ''), 'base64');
+    const key = crypto.scryptSync(pass, salt, 32, { N: 16384, r: 8, p: 1, maxmem: 64 * 1024 * 1024 });
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+    decipher.setAuthTag(tag);
+    plain = Buffer.concat([decipher.update(Buffer.from(String(env.data || ''), 'base64')), decipher.final()]);
+  } catch {
+    throw bad('口令不对，或配置文件已损坏');
+  }
+  const j = JSON.parse(plain.toString('utf8'));
+  if (!j || j.app !== 'tagden' || !j.config || typeof j.config !== 'object') throw bad('配置内容不完整');
+  return j;
+}
+
+function importConfig(envelope, passphrase) {
+  const j = openConfigEnvelope(envelope, passphrase);
+  const next = j.config;
+  try {
+    fs.copyFileSync(CFG_FILE, `${CFG_FILE}.backup-${new Date().toISOString().replace(/[-:]/g, '').slice(0, 15)}`);
+  } catch {
+    /* 首次安装还没有 config.json，无所谓 */
+  }
+  config.sites = next.sites && typeof next.sites === 'object' ? next.sites : {};
+  config.sessions = next.sessions && typeof next.sessions === 'object' ? next.sessions : {};
+  config.ui = next.ui && typeof next.ui === 'object' ? next.ui : config.ui;
+  config.deepseek = next.deepseek && typeof next.deepseek === 'object' ? next.deepseek : config.deepseek;
+  config.seedXingsePurged = next.seedXingsePurged === true;
+  config.port = APP_PORT;
+  sites = new Sites(config);
+  persistConfig();
+  return {
+    ok: true,
+    sites: Object.keys(config.sites || {}).length,
+    restart: true,
+    note: '配置已导入；自然在线登录态可能要在「自然在线」页重新登录一次',
+  };
+}
+
+/* ---------------- 撤销本机写标签 / 重命名 ----------------
+ * 只保留最近 20 次写操作；撤销时把文件挪回原路径，并把原来的中文名/学名写回去。
+ * 不备份整张原图，所以只恢复“名字/位置”，不恢复像素内容（写标签本来就只改 XMP）。
+ */
+function readUndo() {
+  try {
+    const j = JSON.parse(fs.readFileSync(UNDO_FILE, 'utf8'));
+    return Array.isArray(j.items) ? j.items : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeUndo(items) {
+  try {
+    fs.mkdirSync(DATA, { recursive: true });
+    const tmp = `${UNDO_FILE}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify({ items: items.slice(0, 20) }, null, 2), 'utf8');
+    fs.renameSync(tmp, UNDO_FILE);
+  } catch {
+    /* 撤销日志写失败不影响标注 */
+  }
+}
+
+function pushUndo(entry) {
+  const list = readUndo();
+  list.unshift(entry);
+  writeUndo(list);
+}
+
+function undoStatus() {
+  const list = readUndo();
+  const last = list[0] || null;
+  return {
+    ok: true,
+    has: Boolean(last),
+    last: last ? {
+      id: last.id,
+      at: last.at,
+      beforeName: last.beforeName,
+      afterName: last.afterName,
+      cn: last.cn,
+      latin: last.latin,
+    } : null,
+  };
+}
+
+async function apiUndoLast() {
+  const list = readUndo();
+  const entry = list[0];
+  if (!entry) throw bad('没有可撤销的操作');
+  const after = String(entry.afterPath || '');
+  const before = String(entry.beforePath || '');
+  if (!after || !before) throw bad('撤销记录损坏');
+  if (!fs.existsSync(after)) throw bad('要撤销的文件已经不在了');
+  if (path.resolve(after) !== path.resolve(before) && fs.existsSync(before)) {
+    throw bad(`原位置已经有同名文件：${before}`);
+  }
+  let moved = false;
+  if (path.resolve(after) !== path.resolve(before)) {
+    fs.mkdirSync(path.dirname(before), { recursive: true });
+    fs.renameSync(after, before);
+    moved = true;
+  }
+  let labelRestored = false;
+  let warn = '';
+  try {
+    IMG.writeLabel(before, { cn: entry.cn || '', latin: entry.latin || '', note: '', source: '撤销恢复' });
+    labelRestored = true;
+  } catch (err) {
+    warn = `位置已恢复，但标签恢复失败：${err.message}`;
+  }
+  try {
+    LC.drop(path.dirname(before), path.basename(before));
+    LC.drop(path.dirname(after), path.basename(after));
+  } catch {}
+  list.shift();
+  writeUndo(list);
+  return {
+    ok: true,
+    path: before,
+    dir: path.dirname(before),
+    name: path.basename(before),
+    moved,
+    labelRestored,
+    warn,
+  };
+}
+
 async function apiWrite(body) {
   const file = asImage(body.path);
   // 用户正在浏览的这个文件夹：CSV 永远写在这里，文件被归档进子目录也不跟着跑
@@ -1496,6 +1671,21 @@ async function apiWrite(body) {
     at: new Date().toLocaleString('zh-CN', { hour12: false }),
   });
 
+  const oldName = splitNameFields(before);
+  const undoId = crypto.randomUUID();
+  pushUndo({
+    id: undoId,
+    at: Date.now(),
+    beforePath: file,
+    afterPath: finalPath,
+    beforeName: path.basename(file),
+    afterName: path.basename(finalPath),
+    cn: oldName.cn,
+    latin: oldName.latin,
+    renamed,
+    archived,
+  });
+
   // 刚写过的那张直接把新状态记进缓存：不然用户接下去翻文件夹，
   // 这一张会显示成「未知」再被重新读一遍。
   try {
@@ -1512,6 +1702,7 @@ async function apiWrite(body) {
     path: finalPath,
     name: path.basename(finalPath),
     rel: relPath(rootDir, finalPath),
+    undoId,
     renamed,
     archived,
     folder,
@@ -3573,6 +3764,22 @@ async function handleApi(req, res, pathname, q) {
 
   if (pathname === '/api/write' && req.method === 'POST') {
     return sendJson(res, 200, await apiWrite(await readJson(req)));
+  }
+
+  if (pathname === '/api/undo' && req.method === 'GET') {
+    return sendJson(res, 200, undoStatus());
+  }
+  if (pathname === '/api/undo' && req.method === 'POST') {
+    return sendJson(res, 200, await apiUndoLast());
+  }
+
+  if (pathname === '/api/config/export' && req.method === 'POST') {
+    const b = await readJson(req);
+    return sendJson(res, 200, { ok: true, envelope: configEnvelope(b.passphrase) });
+  }
+  if (pathname === '/api/config/import' && req.method === 'POST') {
+    const b = await readJson(req);
+    return sendJson(res, 200, importConfig(b.envelope, b.passphrase));
   }
 
   if (pathname === '/api/export' && req.method === 'POST') {

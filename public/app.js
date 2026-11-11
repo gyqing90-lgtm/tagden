@@ -247,6 +247,8 @@ async function boot() {
   bindZoom();
 
   bindToolbar();
+  bindConfigMigrate();
+  if ($('undoBtn')) $('undoBtn').onclick = undoLastWrite;
   bindNameCheck();
   bindArchiveSheet();
   bindArchiveTab();
@@ -683,6 +685,7 @@ async function loadDir(dir) {
     SCR.bursts = null;
     SCR.groupMode = false;
     if (S.tab === 'score') scoreOpen();
+    refreshUndo();
   } catch (err) {
     toast(err.message);
   }
@@ -1253,6 +1256,113 @@ function neCandidates(el, items, onPick) {
   }
 }
 
+/* ---------------- 配置迁移（导出/导入口令加密的账号与 Key） ---------------- */
+
+function cfgMsg(text, cls) {
+  const el = $('cfgMigrateMsg');
+  if (!el) return;
+  el.textContent = text || '';
+  el.className = `cfg-msg${cls ? ' ' + cls : ''}`;
+}
+
+function bindConfigMigrate() {
+  const mask = $('cfgMigrateMask');
+  if (!mask) return;
+  const open = () => {
+    mask.classList.add('show');
+    $('cfgPass').value = '';
+    $('cfgFile').value = '';
+    cfgMsg('');
+  };
+  const close = () => { mask.classList.remove('show'); $('cfgPass').value = ''; };
+  if ($('cfgMigrateBtn')) $('cfgMigrateBtn').onclick = open;
+  if ($('cfgClose')) $('cfgClose').onclick = close;
+  mask.onclick = (e) => { if (e.target === mask) close(); };
+  if ($('cfgFile')) $('cfgFile').onchange = () => {
+    const f = $('cfgFile').files && $('cfgFile').files[0];
+    cfgMsg(f ? `已选择：${f.name}` : '');
+  };
+  if ($('cfgExportBtn')) $('cfgExportBtn').onclick = async () => {
+    const pass = String($('cfgPass').value || '');
+    if (pass.length < 4) return cfgMsg('口令至少 4 个字符', 'bad');
+    $('cfgExportBtn').disabled = true;
+    try {
+      const r = await post('/api/config/export', { passphrase: pass });
+      const text = JSON.stringify(r.envelope, null, 2);
+      if (typeof Blob === 'function' && window.URL && window.URL.createObjectURL) {
+        const blob = new Blob([text], { type: 'application/json' });
+        const a = document.createElement('a');
+        const stamp = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15);
+        a.href = window.URL.createObjectURL(blob);
+        a.download = `tagden-config-${stamp}.json`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => { try { window.URL.revokeObjectURL(a.href); } catch {} }, 1200);
+        cfgMsg('已导出。请把文件和口令分开保存。', 'ok');
+      } else {
+        cfgMsg('浏览器不支持下载，请换 Chrome / Edge', 'bad');
+      }
+    } catch (err) {
+      cfgMsg('导出失败：' + err.message, 'bad');
+    } finally {
+      $('cfgExportBtn').disabled = false;
+    }
+  };
+  if ($('cfgImportBtn')) $('cfgImportBtn').onclick = async () => {
+    const pass = String($('cfgPass').value || '');
+    if (pass.length < 4) return cfgMsg('口令至少 4 个字符', 'bad');
+    const f = $('cfgFile').files && $('cfgFile').files[0];
+    if (!f) return cfgMsg('先选择备份文件', 'bad');
+    let env;
+    try {
+      env = JSON.parse(await f.text());
+    } catch {
+      return cfgMsg('文件不是有效的配置备份', 'bad');
+    }
+    if (!window.confirm('导入会覆盖当前账号、Key 和界面设置，确定继续？\n原 config.json 会自动备份。')) return;
+    $('cfgImportBtn').disabled = true;
+    try {
+      const r = await post('/api/config/import', { passphrase: pass, envelope: env });
+      cfgMsg(r.note || '配置已导入，页面即将刷新', 'ok');
+      setTimeout(() => window.location.reload(), 1600);
+    } catch (err) {
+      cfgMsg('导入失败：' + err.message, 'bad');
+      $('cfgImportBtn').disabled = false;
+    }
+  };
+}
+
+/** 撤销本机最近一次写标签 / 重命名 */
+async function refreshUndo() {
+  const btn = $('undoBtn');
+  if (!btn) return;
+  try {
+    const r = await api('/api/undo');
+    btn.hidden = !r.has;
+    if (r.has) {
+      btn.disabled = false;
+      btn.title = `撤销：${r.last.afterName} → ${r.last.beforeName}`;
+    }
+  } catch {
+    btn.hidden = true;
+  }
+}
+
+async function undoLastWrite() {
+  const btn = $('undoBtn');
+  if (btn) btn.disabled = true;
+  try {
+    const r = await post('/api/undo', {});
+    toast(r.warn || `已撤销：${r.name}`, r.warn ? 5000 : 2600);
+    await refreshUndo();
+    if (r.dir) await loadDir(r.dir);
+  } catch (err) {
+    toast('撤销失败：' + err.message, 4200);
+    if (btn) btn.disabled = false;
+  }
+}
+
 /**
  * 自动补名字：用户只填中文名或只填学名时，从内置《中国生物物种名录》/ 自然在线分类库
  * 补另一侧。只补空着的一侧，不覆盖用户已经写的；两侧都填就不动。
@@ -1444,8 +1554,10 @@ async function saveNameEdit(p, f, cnInput, laInput, saveBtn) {
       updateFilterCounts();
       if (S.active === p) openPanel(p);
       toast('物种名已写进图片标签', 2400);
+      refreshUndo();
     }
     closeNameEditor();
+    refreshUndo();
   } catch (err) {
     if (saveBtn) saveBtn.disabled = false;
     toast('保存失败：' + err.message, 4000);
@@ -1621,6 +1733,7 @@ async function ncApply() {
       render();
     }
     toast(fail ? `已补齐 ${ok} 张，失败 ${fail} 张` : `已补齐 ${ok} 张照片的名字`, 3200);
+    refreshUndo();
     closeNameCheck();
   } catch (err) {
     $('ncErr').textContent = '写入失败：' + err.message;
@@ -4152,7 +4265,7 @@ async function libSearch(append = false) {
     LIB.items = append ? LIB.items.concat(items) : items;
     LIB.total = Number(r.total) || 0;
     LIB.byPath = new Map(LIB.items.map((it) => [it.path, it]));
-    if (!append) $('libDup').hidden = true;
+    if (!append) { $('libDup').hidden = true; $('libSim').hidden = true; }
     libRender();
   } catch (err) {
     toast('图库搜索失败：' + err.message, 3800);
@@ -4236,6 +4349,7 @@ async function libScan() {
   LIB.busy = true;
   LIB.dups = null;
   $('libDup').hidden = true;
+  $('libSim').hidden = true;
   $('libCancelBtn').hidden = false;
   $('libProgress').hidden = false;
   $('libBar').style.width = '2%';
@@ -4254,6 +4368,7 @@ async function libScan() {
 }
 
 async function libCancel() {
+  if (LIB.simBusy) { LIB.simCancel = true; return; }
   if (!LIB.job) return;
   try {
     await post(`/api/library/${LIB.kind === 'duplicates' ? 'duplicates' : 'scan'}/${enc(LIB.job)}/cancel`, {});
@@ -4270,6 +4385,7 @@ async function libFindDups() {
   LIB.busy = true;
   LIB.dups = null;
   $('libDup').hidden = true;
+  $('libSim').hidden = true;
   $('libCancelBtn').hidden = false;
   $('libProgress').hidden = false;
   $('libBar').style.width = '2%';
@@ -4308,6 +4424,135 @@ function libRenderDups() {
   libStatusText();
 }
 
+/** 浏览器端 dHash：9x8 灰度图，64 位，压缩/裁剪后仍能匹配 */
+function libDHash(url) {
+  return new Promise((resolve) => {
+    if (typeof Image !== 'function') return resolve('');
+    const img = new Image();
+    img.decoding = 'async';
+    img.onload = () => {
+      try {
+        const cv = document.createElement('canvas');
+        cv.width = 9;
+        cv.height = 8;
+        const ctx = cv.getContext && cv.getContext('2d', { willReadFrequently: true });
+        if (!ctx) return resolve('');
+        ctx.drawImage(img, 0, 0, 9, 8);
+        const d = ctx.getImageData(0, 0, 9, 8).data;
+        let bits = '';
+        for (let y = 0; y < 8; y += 1) {
+          for (let x = 0; x < 8; x += 1) {
+            const at = (xx, yy) => {
+              const i = (yy * 9 + xx) * 4;
+              return d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
+            };
+            bits += at(x, y) > at(x + 1, y) ? '1' : '0';
+          }
+        }
+        resolve(BigInt('0b' + bits).toString(16).padStart(16, '0'));
+      } catch {
+        resolve('');
+      }
+    };
+    img.onerror = () => resolve('');
+    img.src = url;
+  });
+}
+
+function libHamming(a, b) {
+  try {
+    let x = BigInt('0x' + a) ^ BigInt('0x' + b);
+    let n = 0;
+    while (x) {
+      n += Number(x & 1n);
+      x >>= 1n;
+    }
+    return n;
+  } catch {
+    return 64;
+  }
+}
+
+async function libFindSimilar() {
+  if (LIB.simBusy) return;
+  const items = (LIB.items || []).slice(0, 200);
+  if (items.length < 2) return toast('先搜索出至少 2 张照片');
+  LIB.simBusy = true;
+  LIB.simCancel = false;
+  LIB.dups = null;
+  $('libDup').hidden = true;
+  $('libSim').hidden = false;
+  $('libSim').innerHTML = '<div class="lib-dup-head"><b>正在计算相似图片…</b><span>当前搜索结果内，最多 200 张</span></div>';
+  $('libCancelBtn').hidden = false;
+  $('libProgress').hidden = false;
+  $('libBar').style.width = '0%';
+  const hashes = [];
+  try {
+    for (let i = 0; i < items.length; i += 1) {
+      if (LIB.simCancel) break;
+      const it = items[i];
+      const h = await libDHash(`/img?path=${enc(it.path)}&thumb=1`);
+      if (h) hashes.push({ it, h });
+      const pct = Math.round(((i + 1) / items.length) * 100);
+      $('libBar').style.width = `${pct}%`;
+      $('libPText').textContent = `相似哈希 ${i + 1}/${items.length}`;
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    if (LIB.simCancel) {
+      toast('已取消相似图片查找', 2200);
+    } else {
+      libRenderSim(hashes);
+      toast(`相似图片检查完成：${hashes.length} 张已计算`, 2800);
+    }
+  } catch (err) {
+    toast('相似图片检查失败：' + err.message, 4200);
+  } finally {
+    LIB.simBusy = false;
+    LIB.simCancel = false;
+    $('libCancelBtn').hidden = true;
+    $('libProgress').hidden = true;
+  }
+}
+
+function libRenderSim(hashes) {
+  const box = $('libSim');
+  if (!box) return;
+  const used = new Set();
+  const groups = [];
+  for (let i = 0; i < hashes.length; i += 1) {
+    if (used.has(i)) continue;
+    const group = [hashes[i]];
+    for (let j = i + 1; j < hashes.length; j += 1) {
+      if (used.has(j)) continue;
+      if (libHamming(hashes[i].h, hashes[j].h) <= 6) {
+        used.add(j);
+        group.push(hashes[j]);
+      }
+    }
+    if (group.length > 1) {
+      used.add(i);
+      groups.push(group);
+    }
+  }
+  box.hidden = false;
+  const head = `<div class="lib-dup-head"><b>相似图片</b><span>${groups.length} 组 · 当前 ${hashes.length} 张结果 · dHash 距离 ≤6</span><span style="flex:1"></span><button class="ghost mini" data-close="1">关闭</button></div>`;
+  if (!groups.length) {
+    box.innerHTML = head + '<div class="lib-dup-group"><div class="lib-dup-title">当前搜索结果里没有发现视觉上相似的照片</div></div>';
+    return;
+  }
+  box.innerHTML = head + groups.map((group) => `<div class="lib-dup-group">
+    <div class="lib-dup-title">${group.length} 张视觉相似 · 压缩/裁剪/调色后也可能命中</div>
+    <div class="lib-dup-items">${group.map(({ it }) => {
+      const label = [it.cn, it.latin].filter(Boolean).join(' ') || it.name;
+      return `<div class="lib-dup-item">
+        <img loading="lazy" src="/img?path=${enc(it.path)}&amp;thumb=1" alt="">
+        <div><div class="nm" title="${esc(it.path)}">${esc(label)}</div><div class="p" title="${esc(it.path)}">${esc(it.path)}</div></div>
+        <div class="lib-dup-actions"><button class="ghost mini" data-d="${esc(it.dir)}">打开</button><button class="ghost mini" data-z="${esc(it.path)}">看图</button></div>
+      </div>`;
+    }).join('')}</div>
+  </div>`).join('');
+}
+
 async function libOpenFolder(dir) {
   if (!dir) return;
   showTab('annotate');
@@ -4326,6 +4571,7 @@ function bindLibrary() {
   if ($('libQ')) $('libQ').onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); libSearch(); } };
   if ($('libFilter')) $('libFilter').onchange = libSearch;
   if ($('libDupBtn')) $('libDupBtn').onclick = libFindDups;
+  if ($('libSimBtn')) $('libSimBtn').onclick = libFindSimilar;
   if ($('libMoreBtn')) $('libMoreBtn').onclick = () => libSearch(true);
   if ($('libCancelBtn')) $('libCancelBtn').onclick = libCancel;
   if ($('libGrid')) $('libGrid').onclick = (e) => {
@@ -4341,13 +4587,16 @@ function bindLibrary() {
     const it = LIB.byPath.get(p);
     if (it) libOpenFolder(it.dir);
   };
-  if ($('libDup')) $('libDup').onclick = (e) => {
-    if (e.target.closest('[data-close]')) { $('libDup').hidden = true; return; }
+  const libResultClick = (e) => {
+    const box = e.currentTarget;
+    if (e.target.closest('[data-close]')) { box.hidden = true; return; }
     const open = e.target.closest('[data-d]');
     if (open) { libOpenFolder(open.dataset.d); return; }
     const z = e.target.closest('[data-z]');
     if (z) { S.active = z.dataset.z; openZoom(); }
   };
+  if ($('libDup')) $('libDup').onclick = libResultClick;
+  if ($('libSim')) $('libSim').onclick = libResultClick;
 }
 
 function showTab(name) {
@@ -4650,6 +4899,8 @@ const NAT = {
   loaded: false,
   loggedIn: false,
   side: 'local', // local = 看本机文件夹的照片；album = 看站点相册里的照片
+  filterQ: '',
+  filterSel: 'all',
   localSel: new Set(), // 勾选的本地照片（绝对路径），用来上传
   albums: [],
   album: null, // 当前打开的相册 { id, title }
@@ -5349,24 +5600,55 @@ function natFolderCardHtml(d) {
   </div>`;
 }
 
+function natFilterActive() {
+  return Boolean(NAT.filterQ) || NAT.filterSel !== 'all';
+}
+
+function natPhotoMatches(p) {
+  const q = String(NAT.filterQ || '').trim().toLowerCase();
+  if (NAT.filterSel === 'latin' && !p.lname) return false;
+  if (NAT.filterSel === 'nolatin' && p.lname) return false;
+  if (!q) return true;
+  return [p.fileName, p.name, p.cname, p.lname, p.date, p.place].some((x) => String(x || '').toLowerCase().includes(q));
+}
+
+function natLocalMatches(f) {
+  const q = String(NAT.filterQ || '').trim().toLowerCase();
+  const hasLatin = hasLatinName(f);
+  if (NAT.filterSel === 'latin' && !hasLatin) return false;
+  if (NAT.filterSel === 'nolatin' && hasLatin) return false;
+  if (!q) return true;
+  return [f.name, f.labelTitle, f.path].some((x) => String(x || '').toLowerCase().includes(q));
+}
+
+function natFilterInfo(shown, all) {
+  const el = $('natFilterInfo');
+  if (!el) return;
+  el.textContent = natFilterActive() ? `筛选 ${shown}/${all}` : '';
+}
+
 /** 本地模式：子文件夹 + 图片一起铺成卡片；照片可勾选，也可拖到右边相册上传 */
 function renderNatLocal() {
   const grid = $('natGrid');
   if (!grid) return;
   $('natPager').hidden = true;
-  const files = natLocalList();
-  const dirs = S.dirs || [];
+  const allFiles = natLocalList();
+  const files = allFiles.filter(natLocalMatches);
+  const dirs = natFilterActive() ? [] : (S.dirs || []);
   NAT.visibleTotal = files.length;
+  natFilterInfo(files.length, allFiles.length);
   // 换了文件夹后，勾选里那些已经不在本目录的路径要清掉，免得「上传这些 N 张」数字虚高
-  const valid = new Set(files.map((f) => f.path));
+  const valid = new Set(allFiles.map((f) => f.path));
   for (const p of [...NAT.localSel]) if (!valid.has(p)) NAT.localSel.delete(p);
   $('natAlbumName').textContent = S.dir ? shortenPath(S.dir) : '先在左边选一个文件夹';
   $('natAlbumName').title = S.dir || '';
   grid.innerHTML = '';
   if (!files.length && !dirs.length) {
     natEmpty(
-      '这个文件夹没有图片',
-      S.dir ? '换一个文件夹；右边是账号里的相册，点开就能看站点照片。' : '在左边的文件树里点一个装有照片的文件夹。',
+      natFilterActive() && allFiles.length ? '没有匹配的照片' : '这个文件夹没有图片',
+      natFilterActive() && allFiles.length
+        ? '换个关键词，或把筛选改回「全部」'
+        : (S.dir ? '换一个文件夹；右边是账号里的相册，点开就能看站点照片。' : '在左边的文件树里点一个装有照片的文件夹。'),
     );
     natSyncSel();
     return;
@@ -5412,6 +5694,10 @@ async function natUploadLocal() {
 
 async function natOpenAlbum(id, title) {
   NAT.album = { id, title };
+  NAT.filterQ = '';
+  NAT.filterSel = 'all';
+  if ($('natFilterQ')) $('natFilterQ').value = '';
+  if ($('natFilterSel')) $('natFilterSel').value = 'all';
   NAT.page = 1;
   NAT.sel.clear();
   renderNatAlbums();
@@ -5448,16 +5734,24 @@ async function natLoadPhotos() {
 function renderNatPhotos() {
   const grid = $('natGrid');
   grid.innerHTML = '';
-  NAT.visibleTotal = NAT.photos.length;
+  const photos = (NAT.photos || []).filter(natPhotoMatches);
+  NAT.visibleTotal = photos.length;
+  natFilterInfo(photos.length, (NAT.photos || []).length);
   if (!NAT.photos.length) {
     natEmpty('这个相册还是空的', '在「标注」页勾好图，再点上面那个「上传选中的」');
     renderNatPager();
     natSyncSel();
     return;
   }
+  if (!photos.length) {
+    natEmpty('没有匹配的照片', '换个关键词，或把筛选改回「全部」');
+    renderNatPager();
+    natSyncSel();
+    return;
+  }
   $('natEmpty').hidden = true;
   const frag = document.createDocumentFragment();
-  for (const p of NAT.photos) {
+  for (const p of photos) {
     const on = NAT.sel.has(p.photoId);
     const card = document.createElement('div');
     card.className = 'card' + (on ? ' sel' : '');
@@ -6852,6 +7146,18 @@ function bindNature() {
   if ($('natOrigBtn')) $('natOrigBtn').onclick = natDownloadOriginal;
   if ($('natKmlBtn')) $('natKmlBtn').onclick = natDownloadKml;
   if ($('natClearCacheBtn')) $('natClearCacheBtn').onclick = natClearCache;
+  if ($('natFilterQ')) {
+    let t = 0;
+    $('natFilterQ').oninput = () => {
+      NAT.filterQ = $('natFilterQ').value;
+      clearTimeout(t);
+      t = setTimeout(() => { if (NAT.side === 'album') renderNatPhotos(); else renderNatLocal(); }, 120);
+    };
+  }
+  if ($('natFilterSel')) $('natFilterSel').onchange = () => {
+    NAT.filterSel = $('natFilterSel').value || 'all';
+    if (NAT.side === 'album') renderNatPhotos(); else renderNatLocal();
+  };
   if ($('natLocalOpen')) $('natLocalOpen').onclick = () => showTab('annotate');
 
   $('natCapImg').onclick = () => natCaptcha();

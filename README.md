@@ -27,7 +27,7 @@ npm run canary -- --self-test    # 只检查素材/站点表，不联网（CI �
 npm run canary -- --all          # 连付费/可选站点一起跑（会消耗额度）
 
 # Windows 冒烟（在 Windows 上跑，不碰真实 data/）：
-powershell -ExecutionPolicy Bypass -File .\tools\smoke-win.ps1 -Exe .\tagden-0.7.0.exe
+powershell -ExecutionPolicy Bypass -File .\tools\smoke-win.ps1 -Exe .\tagden-0.7.1.exe
 ```
 
 发布签名（首次发版前做一次）：
@@ -35,8 +35,8 @@ powershell -ExecutionPolicy Bypass -File .\tools\smoke-win.ps1 -Exe .\tagden-0.7
 ```bash
 npm run keygen    # 生成 ~/.tagden/update-signing-key.pem（私钥，别进仓库）和 update-pubkey.pem（公钥）
 npm test          # 29 项回归
-npm run build:win -- 0.7.0
-npm run build:mac -- 0.7.0
+npm run build:win -- 0.7.1
+npm run build:mac -- 0.7.1
 npm run sign      # 给 dist/latest.json 与 dist-mac/latest-mac.json 签名
 npm run publish   # 上传并回读校验；配了公钥后，未签名/验签失败的清单会被拒绝
 # 发布凭据在仓库外：~/.tagden/oss.config.json，或 --config / OSS_CONFIG / OSS_* 环境变量
@@ -46,7 +46,7 @@ npm run publish   # 上传并回读校验；配了公钥后，未签名/验签�
 
 ```bash
 TAGDEN_WIN_SIGN_CMD='signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /sha1 <证书指纹> {exe}' \
-  npm run build:win -- 0.7.0
+  npm run build:win -- 0.7.1
 ```
 
 > 当前仓库没有证书，发布的 exe 仍是未签名状态；配好证书后重新构建，`build-exe.js` 会在算清单哈希前自动签名。
