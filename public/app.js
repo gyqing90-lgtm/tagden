@@ -242,6 +242,23 @@ function bindTheme() {
   if ($('themeBtn')) $('themeBtn').onclick = () => applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
 }
 
+const RAIL_KEY = 'tagden-rail-collapsed';
+function setRailCollapsed(on) {
+  const lay = document.querySelector('.layout');
+  if (lay) lay.classList.toggle('rail-collapsed', Boolean(on));
+  if ($('railExpand')) $('railExpand').hidden = !on;
+  try { localStorage.setItem(RAIL_KEY, on ? '1' : '0'); } catch {}
+}
+function bindRailCollapse() {
+  let saved = false;
+  try { saved = localStorage.getItem(RAIL_KEY) === '1'; } catch {}
+  setRailCollapsed(saved && !drawerNarrow());
+  if ($('railCollapse')) $('railCollapse').onclick = () => setRailCollapsed(true);
+  if ($('albumRailCollapse')) $('albumRailCollapse').onclick = () => setRailCollapsed(true);
+  if ($('railExpand')) $('railExpand').onclick = () => setRailCollapsed(false);
+  window.addEventListener('resize', () => { if (drawerNarrow()) setRailCollapsed(false); });
+}
+
 function drawerNarrow() {
   return window.matchMedia && window.matchMedia('(max-width: 1180px)').matches;
 }
@@ -294,6 +311,7 @@ async function boot() {
   }
   bindTheme();
   bindDrawers();
+  bindRailCollapse();
   renderPresets();
   renderChips();
   renderPlaces();
@@ -4256,8 +4274,8 @@ function bindUpdate() {
  */
 function syncSrcAvailability(tab) {
   const statsLock = tab === 'stats' || tab === 'archive' || tab === 'library';
-  const natLock = tab === 'nature';
-  const locked = statsLock || natLock;
+  const natLock = false; // 自然在线页现在允许用左栏「相册端」
+  const locked = statsLock;
   const seg = $('srcSeg');
   if (seg) {
     for (const b of seg.querySelectorAll('button[data-src]')) {
@@ -5068,6 +5086,7 @@ function natOpen() {
   const keepAlbum = Boolean(NAT.album) && SCR.mode === 'album'
     && String(SCR.albumId) === String(NAT.album.id);
   NAT.side = keepAlbum ? 'album' : 'local';
+  applyNatRailSide(NAT.side);
   syncNatSideUI(true);
   refreshNatScores();
   if (!NAT.loaded) natStatus();
@@ -5191,6 +5210,7 @@ async function natLoadAlbums() {
     return;
   }
   renderNatAlbums();
+  renderAlbumRail();
   natRefreshSelects();
 }
 
@@ -5212,6 +5232,7 @@ async function natEnsureAlbums() {
   try {
     const r = await api('/api/nat/albums');
     NAT.albums = r.albums || [];
+    renderAlbumRail();
     natRefreshSelects();
   } catch {
     /* 站点没连上就先空着，别打扰标注页 */
@@ -5261,17 +5282,48 @@ function natPhotoAsFile(p) {
   };
 }
 
+/** 把「本机端/相册端」的状态同步到左栏（自然在线页和标注页共用） */
+function applyNatRailSide(side) {
+  const album = side === 'album';
+  const seg = $('srcSeg');
+  if (seg) [...seg.querySelectorAll('button[data-src]')].forEach((b) => b.classList.toggle('on', b.dataset.src === side));
+  if ($('railHeadFiles')) $('railHeadFiles').hidden = album;
+  if ($('railHeadAlbums')) $('railHeadAlbums').hidden = !album;
+  if ($('albumRail')) $('albumRail').hidden = !album;
+  const pathbox = $('pathInput') && $('pathInput').closest('.pathbox');
+  if (pathbox) pathbox.hidden = album;
+  if ($('places')) $('places').hidden = album;
+  if ($('tree')) $('tree').hidden = album;
+}
+
+/** 自然在线页左栏切换：不碰标注页的 S.mode，只换 NAT.side */
+async function setNatSource(side) {
+  const next = side === 'album' ? 'album' : 'local';
+  if (NAT.side === next) {
+    applyNatRailSide(next);
+    return;
+  }
+  NAT.side = next;
+  applyNatRailSide(next);
+  if (next === 'album') {
+    await natEnsureAlbums();
+    renderAlbumRail();
+  }
+  syncNatSideUI(true);
+}
+
 /** 相册端左栏：相册列表 */
 function renderAlbumRail() {
   const box = $('albumRail');
   if (!box) return;
+  if ($('albumRailCount')) $('albumRailCount').textContent = NAT.albums.length;
   if (!NAT.loggedIn) {
     box.innerHTML =
       '<div class="ar-empty"><b>相册没登录</b><br>相册要用你自己的自然在线账号。到「自然在线」页登录一次（验证码只能人眼看），回来这里就有相册了。<br>识别本身用的是程序内置账号，不登录也能认。</div>';
     return;
   }
   if (!NAT.albums.length) {
-    box.innerHTML = '<div class="ar-empty"><b>还没有相册</b>到「自然在线」页新建一个，再把照片传上去。</div>';
+    box.innerHTML = '<div class="ar-empty"><b>还没有相册</b>点上面的 ＋ 新建一个，再把照片传上去。</div>';
     return;
   }
   box.innerHTML = NAT.albums
@@ -5791,6 +5843,8 @@ async function natUploadLocal() {
 
 async function natOpenAlbum(id, title) {
   NAT.album = { id, title };
+  NAT.side = 'album';
+  applyNatRailSide('album');
   NAT.filterQ = '';
   NAT.filterSel = 'all';
   if ($('natFilterQ')) $('natFilterQ').value = '';
@@ -5798,9 +5852,8 @@ async function natOpenAlbum(id, title) {
   NAT.page = 1;
   NAT.sel.clear();
   renderNatAlbums();
+  renderAlbumRail();
   $('natAlbumName').textContent = title;
-  // 相册列就在右边，左栏保持本机端不动；中间这块单独切到站点照片
-  NAT.side = 'album';
   syncNatSideUI(false);
   await natLoadPhotos();
   natSyncUpBtn();
@@ -7213,18 +7266,19 @@ function bindNature() {
       const b = e.target.closest('button[data-src]');
       if (!b || b.disabled) return;
       // 自然在线页点过右边相册后，左栏仍停在本机端；再点一次「本机端」= 中间回到本机文件夹
-      if (b.dataset.src === 'local' && S.mode === 'local' && S.tab === 'nature' && NAT.side === 'album') {
-        NAT.side = 'local';
-        syncNatSideUI(true);
+      if (S.tab === 'nature') {
+        setNatSource(b.dataset.src);
         return;
       }
       setSource(b.dataset.src);
     };
   }
   if ($('albumRail')) {
-    $('albumRail').onclick = (e) => {
+    $('albumRail').onclick = async (e) => {
       const it = e.target.closest('.ar-item');
-      if (it) openAlbumHere(it.dataset.id, it.dataset.title);
+      if (!it) return;
+      if (S.tab === 'nature') await natOpenAlbum(it.dataset.id, it.dataset.title);
+      else openAlbumHere(it.dataset.id, it.dataset.title);
     };
   }
   if ($('albumRailRefresh')) {
@@ -7234,6 +7288,35 @@ function bindNature() {
       renderAlbumRail();
       if (NAT.album) await loadAlbumPhotos();
     };
+  }
+  if ($('albumRailNewBtn')) {
+    $('albumRailNewBtn').onclick = async () => {
+      if (!NAT.loggedIn) return toast('先在「自然在线」页登录');
+      const title = window.prompt('新相册名称');
+      if (!title || !title.trim()) return;
+      try {
+        const r = await post('/api/nat/albums', { title: title.trim() });
+        await natLoadAlbums();
+        await natOpenAlbum(r.id, title.trim());
+        toast(`相册「${title.trim()}」建好了`, 2400);
+      } catch (err) {
+        toast('新建失败：' + err.message, 4000);
+      }
+    };
+  }
+  if ($('albumRail')) {
+    natBindDrop(
+      $('albumRail'),
+      (e) => {
+        const row = e.target.closest('.ar-item');
+        return row ? { kind: 'album', id: row.dataset.id } : null;
+      },
+      (e, on) => {
+        for (const r of $('albumRail').querySelectorAll('.ar-item.drop-on')) r.classList.remove('drop-on');
+        const row = on && e.target.closest('.ar-item');
+        if (row) row.classList.add('drop-on');
+      },
+    );
   }
   if ($('natWriteOne')) $('natWriteOne').onclick = () => natWriteOne();
   bindNatDrops();

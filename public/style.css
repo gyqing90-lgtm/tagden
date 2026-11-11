@@ -3470,3 +3470,81 @@ html[data-theme="dark"] .nw {
 }
 html[data-theme="dark"] .mask { background: rgba(0, 0, 0, .68); }
 html[data-theme="dark"] .toast { background: #26352c; color: #f2f7f3; }
+
+/* =====================================================================
+   0.8.2：左栏折叠 / 自然在线相册并入左栏
+   ===================================================================== */
+.rail-collapse {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--card);
+  color: var(--ink-3);
+  line-height: 1;
+  font-size: 16px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+}
+.rail-collapse:hover { color: var(--green-d); background: var(--green-l); }
+.rail-expand {
+  display: none;
+  position: fixed;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 45;
+  width: 22px;
+  height: 58px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-left: 0;
+  border-radius: 0 9px 9px 0;
+  background: var(--card);
+  color: var(--ink-2);
+  box-shadow: 4px 0 12px rgba(31, 42, 34, .08);
+  font-size: 18px;
+  line-height: 1;
+}
+.rail-expand:hover { color: var(--green-d); background: var(--green-l); }
+.layout.rail-collapsed { grid-template-columns: 0 0 minmax(0, 1fr) !important; }
+.layout.rail-collapsed .rail,
+.layout.rail-collapsed .gutter { display: none; }
+.layout.rail-collapsed .rail-expand { display: grid; place-items: center; }
+.layout.rail-collapsed #railToggle { display: none !important; }
+
+/* 自然在线：右侧相册栏移除，照片区占满；相册改到左栏「相册端」 */
+#natView .nat-body { grid-template-columns: minmax(0, 1fr) !important; }
+#natView .nat-body > .gutter,
+#natView .nat-body > .nat-albums { display: none !important; }
+#natView .nat-photos { min-width: 0; }
+#natView .nat-photos .grid { grid-template-columns: repeat(auto-fill, minmax(156px, 1fr)); }
+.rail-head b#albumRailCount {
+  color: var(--green);
+  font-size: 11.5px;
+  margin-left: -4px;
+  font-variant-numeric: tabular-nums;
+}
+.album-rail .ar-item.drop-on {
+  background: var(--green-l);
+  box-shadow: inset 0 0 0 1px var(--green);
+}
+.album-rail .ar-item[draggable="true"] { cursor: grab; }
+
+@media (max-width: 1180px) {
+  .layout.rail-collapsed { grid-template-columns: minmax(0, 1fr) !important; }
+  .layout.rail-collapsed .rail { display: flex; }
+  .layout.rail-collapsed .rail-expand,
+  .layout.rail-collapsed .rail-collapse,
+  .rail-collapse { display: none; }
+}
+html[data-theme="dark"] .rail-expand,
+html[data-theme="dark"] .rail-collapse {
+  background: var(--card);
+  border-color: var(--line);
+  color: var(--ink-2);
+}
+html[data-theme="dark"] .album-rail .ar-item:hover { background: #243129; }
+html[data-theme="dark"] .album-rail .ar-item.on { background: var(--green-l); color: var(--green-d); }

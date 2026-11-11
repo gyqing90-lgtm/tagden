@@ -45,3 +45,7 @@ update-signing-key.pem
 
 # ---------- 站点 canary 本地报告 ----------
 canary-report*.json
+
+# ---------- 本地大模型/运行库（体积大，绝不进仓库） ----------
+models/
+.tmp-wb/

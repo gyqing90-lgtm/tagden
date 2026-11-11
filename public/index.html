@@ -59,7 +59,7 @@
         <button data-src="album">相册端</button>
       </div>
     </div>
-    <div class="rail-head" id="railHeadFiles">文件夹<button id="treeRefresh" class="rail-refresh" title="重新读取磁盘和文件夹（新插的 U 盘、刚建的文件夹）">↻</button></div>
+    <div class="rail-head" id="railHeadFiles"><button id="railCollapse" class="rail-collapse" type="button" title="收起文件夹栏">‹</button>文件夹<button id="treeRefresh" class="rail-refresh" title="重新读取磁盘和文件夹（新插的 U 盘、刚建的文件夹）">↻</button></div>
     <div class="pathbox">
       <input id="pathInput" type="text" spellcheck="false" placeholder="粘贴完整路径，回车进入">
       <button id="goBtn" title="进入">↵</button>
@@ -68,9 +68,11 @@
     <div id="tree" class="tree"></div>
 
     <!-- 相册端：左栏换成自然在线的相册列表（本机端时整块藏起来） -->
-    <div class="rail-head" id="railHeadAlbums" hidden>自然在线相册<button id="albumRailRefresh" class="rail-refresh" title="重新读一遍相册列表">↻</button></div>
+    <div class="rail-head" id="railHeadAlbums" hidden><button id="albumRailCollapse" class="rail-collapse" type="button" title="收起文件夹栏">‹</button><span>自然在线相册</span><b id="albumRailCount">0</b><button id="albumRailNewBtn" class="rail-refresh" type="button" title="新建相册">＋</button><button id="albumRailRefresh" class="rail-refresh" title="重新读一遍相册列表">↻</button></div>
     <div id="albumRail" class="album-rail" hidden></div>
   </aside>
+
+  <button id="railExpand" class="rail-expand" type="button" title="展开文件夹栏">›</button>
 
   <div class="gutter" id="gutRail" title="拖动调整文件夹栏宽度，双击复位"></div>
 
