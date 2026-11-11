@@ -2635,3 +2635,157 @@ button.accent:disabled { opacity: .55; }
 .nc-row-note.warn { color: #b26a00; }
 .nc-pick { width: 100%; margin-top: 5px; padding: 4px 6px; border: 1px solid var(--line); border-radius: 7px; font-size: 12px; }
 .nc-err { font-size: 12px; color: var(--red); min-height: 18px; margin-top: 6px; }
+
+/* ---------- 图库管理：全库索引 / 搜索 / 重复文件 ---------- */
+#libraryView {
+  display: none;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+#libraryView.on { display: flex; }
+.lib-head {
+  flex: 0 0 auto;
+  padding: 10px 16px 8px;
+  border-bottom: 1px solid var(--line);
+  background: var(--card);
+}
+.lib-bar, .lib-searchbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.lib-bar { margin-bottom: 7px; }
+.lib-bar input {
+  flex: 1 1 360px;
+  min-width: 180px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font: inherit;
+  font-size: 12.5px;
+  background: #fff;
+  color: var(--ink);
+}
+.lib-searchbar input {
+  flex: 1 1 260px;
+  min-width: 160px;
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font: inherit;
+  font-size: 12.5px;
+  background: #fff;
+  color: var(--ink);
+}
+.lib-searchbar select {
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--ink);
+}
+.lib-stat { font-size: 11.5px; color: var(--ink-3); }
+.lib-progress {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 2px 0 7px;
+  font-size: 11.5px;
+  color: var(--ink-3);
+}
+.lib-progress[hidden] { display: none !important; }
+.lib-progress .bar {
+  flex: 1 1 auto;
+  height: 7px;
+  border-radius: 99px;
+  background: var(--line-soft);
+  overflow: hidden;
+}
+.lib-progress .fill {
+  width: 0;
+  height: 100%;
+  background: var(--green);
+  transition: width .15s;
+}
+.lib-more { flex: 0 0 auto; padding: 0 16px 12px; text-align: center; }
+.lib-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+#libGrid {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 14px 16px;
+}
+.lib-dup {
+  flex: 0 0 auto;
+  max-height: 46%;
+  overflow: auto;
+  padding: 10px 16px 14px;
+  border-top: 1px solid var(--line);
+  background: var(--bg-2, #fafbf9);
+}
+.lib-dup[hidden] { display: none !important; }
+.lib-dup-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+.lib-dup-head b { color: var(--ink); }
+.lib-dup-group {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--card);
+  margin-bottom: 8px;
+  overflow: hidden;
+}
+.lib-dup-title {
+  padding: 6px 10px;
+  font-size: 11.5px;
+  color: var(--ink-3);
+  background: var(--line-soft);
+}
+.lib-dup-items { display: flex; flex-wrap: wrap; gap: 8px; padding: 8px 10px; }
+.lib-dup-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 100%;
+  padding: 4px 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  font-size: 11.5px;
+}
+.lib-dup-item img {
+  width: 46px;
+  height: 34px;
+  object-fit: cover;
+  border-radius: 4px;
+  display: block;
+}
+.lib-dup-item .nm {
+  max-width: 330px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lib-dup-item .p {
+  max-width: 330px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink-3);
+  font-size: 10.5px;
+}
+.lib-dup-actions { display: flex; gap: 5px; flex: 0 0 auto; }

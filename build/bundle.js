@@ -40,6 +40,8 @@ const MODULES = [
   'lib/labelcache.js',
   'lib/taxonomy.js',
   'lib/stats.js',
+  // 图库索引/搜索/重复文件：漏了它，exe 打开图库页会报「模块未打包」
+  'lib/library.js',
   // 自然在线（账号相册）：漏了这两个，源码跑得好好的，打出来的 exe 会报「模块未打包」
   'lib/nature-client.js',
   'lib/nature-store.js',

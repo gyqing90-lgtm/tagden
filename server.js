@@ -40,6 +40,7 @@ const SEED_CIPHER = require('./lib/seed');
 const LC = require('./lib/labelcache');
 const TAXO = require('./lib/taxonomy');
 const STATS = require('./lib/stats');
+const LIB = require('./lib/library');
 const REGIONS = require('./lib/regions');
 const ASSETS = require('./lib/assets');
 // 自然在线（账号相册）—— 复用 nature-client 项目里那套模块，本文件只管路由和任务
@@ -102,6 +103,7 @@ SCORE.init({ dataDir: DATA, cacheDir: CACHE });
 // 本地大模型运行库：解压到 CACHE/llama-runtime/，pid 记在 data/llama.pid
 LLAMA.init({ cacheDir: CACHE });
 IDC.init({ dir: path.join(CACHE, 'identify') });
+LIB.init({ cacheDir: CACHE });
 try {
   fs.mkdirSync(THUMBS, { recursive: true });
 } catch {}
@@ -3135,6 +3137,136 @@ async function analyzeStats(dir) {
   };
 }
 
+/* ---------------- 图库索引 / 搜索 / 重复文件 ---------------- */
+
+const LIB_JOBS = new Map();
+
+function libJobView(job) {
+  return {
+    id: job.id,
+    kind: job.kind,
+    status: job.status,
+    phase: job.phase,
+    done: job.done,
+    total: job.total,
+    current: job.current,
+    error: job.error,
+    result: job.status === 'done' ? job.result : null,
+  };
+}
+
+function startLibJob(kind, fn) {
+  const job = {
+    id: crypto.randomUUID(),
+    kind,
+    status: 'running',
+    phase: 'starting',
+    done: 0,
+    total: 0,
+    current: '',
+    error: '',
+    cancelled: false,
+    result: null,
+    startedAt: Date.now(),
+  };
+  LIB_JOBS.set(job.id, job);
+  for (const [id, j] of LIB_JOBS) {
+    if (Date.now() - j.startedAt > 3600000) LIB_JOBS.delete(id);
+  }
+  Promise.resolve()
+    .then(() => fn(job))
+    .then((result) => {
+      if (job.cancelled) {
+        job.status = 'cancelled';
+        return;
+      }
+      job.status = 'done';
+      job.result = result;
+      job.phase = 'done';
+    })
+    .catch((err) => {
+      job.status = job.cancelled ? 'cancelled' : 'error';
+      job.error = err && err.message ? err.message : String(err);
+    });
+  return job.id;
+}
+
+async function handleLibrary(req, res, pathname, q) {
+  if (pathname === '/api/library/status' && req.method === 'GET') {
+    return sendJson(res, 200, LIB.status());
+  }
+
+  if (pathname === '/api/library/search' && req.method === 'GET') {
+    return sendJson(res, 200, LIB.search({
+      q: q.get('q') || '',
+      filter: q.get('filter') || 'all',
+      limit: q.get('limit') || 120,
+      offset: q.get('offset') || 0,
+    }));
+  }
+
+  if (pathname === '/api/library/scan' && req.method === 'POST') {
+    const b = await readJson(req);
+    const root = String(b.root || '').trim();
+    if (!root) throw bad('请填写要索引的文件夹路径');
+    const id = startLibJob('scan', async (job) => {
+      job.phase = 'walking';
+      return LIB.scan(root, {
+        isCancelled: () => job.cancelled,
+        onProgress: (p) => {
+          job.phase = p.phase;
+          job.done = p.done;
+          job.total = p.total || 0;
+          job.current = p.current || '';
+        },
+      });
+    });
+    return sendJson(res, 200, { ok: true, id });
+  }
+
+  if (pathname === '/api/library/duplicates' && req.method === 'POST') {
+    const id = startLibJob('duplicates', async (job) => {
+      job.phase = 'hashing';
+      return LIB.duplicates({
+        isCancelled: () => job.cancelled,
+        onProgress: (p) => {
+          job.phase = p.phase;
+          job.done = p.done;
+          job.total = p.total || 0;
+          job.current = p.current || '';
+        },
+      });
+    });
+    return sendJson(res, 200, { ok: true, id });
+  }
+
+  const scanJob = /^\/api\/library\/scan\/([^/]+)$/.exec(pathname);
+  if (scanJob && req.method === 'GET') {
+    const job = LIB_JOBS.get(scanJob[1]);
+    if (!job) throw bad('任务不存在或已过期');
+    return sendJson(res, 200, { ok: true, ...libJobView(job) });
+  }
+  if (scanJob && req.method === 'POST' && pathname.endsWith('/cancel')) {
+    // 不会走到这里（路径多了一段 /cancel），保留给下面的显式匹配
+  }
+  const cancelJob = /^\/api\/library\/(scan|duplicates)\/([^/]+)\/cancel$/.exec(pathname);
+  if (cancelJob && req.method === 'POST') {
+    const job = LIB_JOBS.get(cancelJob[2]);
+    if (!job) throw bad('任务不存在或已过期');
+    job.cancelled = true;
+    return sendJson(res, 200, { ok: true });
+  }
+
+  const dupJob = /^\/api\/library\/duplicates\/([^/]+)$/.exec(pathname);
+  if (dupJob && req.method === 'GET') {
+    const job = LIB_JOBS.get(dupJob[1]);
+    if (!job) throw bad('任务不存在或已过期');
+    return sendJson(res, 200, { ok: true, ...libJobView(job) });
+  }
+
+  throw bad('未知的图库接口');
+}
+
 async function apiStats(q) {
   let dir;
   try {
@@ -3381,6 +3513,9 @@ async function handleApi(req, res, pathname, q) {
 
   // 统计分析：递归扫当前文件夹及其子文件夹下所有已标注/未标注物种图
   if (pathname === '/api/stats') return sendJson(res, 200, await apiStats(q));
+
+  // 图库：全库索引 / 搜索 / 重复文件
+  if (pathname.startsWith('/api/library/')) return handleLibrary(req, res, pathname, q);
 
   // 盘符（左侧树的根）。卷标是后台查的，第一次可能还没到，前端据此再拉一次
   if (pathname === '/api/drives') {

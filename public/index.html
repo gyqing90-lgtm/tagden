@@ -34,6 +34,7 @@
   <button class="tab" data-tab="archive" title="把散落在各个文件夹里的图片按 界/门/纲/目/科/属 归并到同一个总文件夹">按分类归档</button>
   <button class="tab" data-tab="nature" title="自然在线账号里的相册：把这里标好的图传上去，或者把账号里的图拉回来">自然在线</button>
   <button class="tab" data-tab="score" title="照片技术评分：清晰度、焦点、曝光、连拍分组、选片；可接云端或本地大模型做 AI 判别">照片评分</button>
+  <button class="tab" data-tab="library" title="给一个根文件夹建索引，跨子文件夹搜索物种/文件名，并查找内容完全相同的重复图片">图库管理</button>
 </nav>
 
 <div class="upbar" id="upbar" hidden>
@@ -474,6 +475,39 @@
         </div>
       </div>
     </div><!-- /scoreView -->
+
+    <div id="libraryView">
+      <div class="lib-head">
+        <div class="lib-bar">
+          <input id="libRoot" type="text" spellcheck="false" placeholder="要索引的根文件夹，例如 E:\照片\2026">
+          <button id="libUseCur" class="ghost mini" title="把当前左侧选中的文件夹填进来">用当前文件夹</button>
+          <button id="libScanBtn" class="primary mini" title="递归扫描这个文件夹及所有子文件夹，读标签、文件名、拍摄时间；只读，不改文件">建立 / 更新索引</button>
+          <button id="libCancelBtn" class="ghost mini" hidden>取消</button>
+        </div>
+        <div class="lib-progress" id="libProgress" hidden>
+          <div class="bar"><div class="fill" id="libBar"></div></div>
+          <span id="libPText"></span>
+        </div>
+        <div class="lib-searchbar">
+          <input id="libQ" type="text" spellcheck="false" placeholder="搜中文名 / 学名 / 文件名 / 文件夹">
+          <select id="libFilter" title="筛选索引结果">
+            <option value="all">全部</option>
+            <option value="latin">有学名</option>
+            <option value="nolatin">没有学名</option>
+            <option value="gps">有 GPS</option>
+          </select>
+          <button id="libSearchBtn" class="ghost mini">搜索</button>
+          <button id="libDupBtn" class="ghost mini" title="按文件大小 + SHA-256 找内容完全相同的图片">查找重复文件</button>
+          <span id="libStat" class="lib-stat"></span>
+        </div>
+      </div>
+      <div class="lib-body">
+        <div id="libGrid" class="grid"></div>
+        <div class="lib-more" id="libMoreBox" hidden><button id="libMoreBtn" class="ghost mini">加载更多</button></div>
+        <div id="libEmpty" class="empty" hidden></div>
+        <div id="libDup" class="lib-dup" hidden></div>
+      </div>
+    </div><!-- /libraryView -->
   </main>
 
   <aside class="panel" id="panel">

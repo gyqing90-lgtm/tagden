@@ -56,6 +56,21 @@ const S = {
 };
 // jsdom 验收要拿得到状态（和 SCR / NAT 一个理由）
 if (typeof window !== 'undefined') window.S = S;
+/** 图库管理页状态：索引统计 + 当前搜索结果 + 重复文件结果 */
+const LIB = {
+  status: null,
+  items: [],
+  byPath: new Map(),
+  total: 0,
+  q: '',
+  filter: 'all',
+  dups: null,
+  busy: false,
+  job: '',
+  kind: '',
+  timer: 0,
+};
+if (typeof window !== 'undefined') window.LIB = LIB;
 
 /* ---------------- 基础 ---------------- */
 
@@ -239,6 +254,7 @@ async function boot() {
   bindTabs();
   bindNature();
   bindScore();
+  bindLibrary();
   bindTaxoTip();
   bindGutters();
   loadTree();
@@ -1930,6 +1946,7 @@ function zoomList() {
   try {
     // 自然在线页看的是站点相册：没有 S.files 的本地路径，用 NAT.photos 拼同样的伪文件
     if (S.tab === 'nature' && NAT.side === 'album') return (NAT.photos || []).map(natPhotoAsFile);
+    if (S.tab === 'library') return (LIB.items || []).map((it) => ({ path: it.path, name: it.name }));
     return pageView().all || [];
   } catch { return []; }
 }
@@ -1949,6 +1966,7 @@ function zoomLoad(p) {
     const np = (NAT.photos || []).find((x) => String(x.photoId) === id);
     if (np) f = natPhotoAsFile(np);
   }
+  if (!f && typeof LIB !== 'undefined' && LIB.byPath) f = LIB.byPath.get(p);
   const img = $('zoomImg');
   if (img) {
     // 相册照片没有本地路径，原图要从站点的图片接口拿
@@ -1996,6 +2014,23 @@ function zoomStep(d) {
     const j = Math.min(list.length - 1, Math.max(0, i + d));
     if (j === i) return;
     const p = NAT_KEY + String(list[j].photoId);
+    ZOOM.s = 1;
+    ZOOM.tx = 0;
+    ZOOM.ty = 0;
+    S.active = p;
+    zoomLoad(p);
+    zoomPaint();
+    return;
+  }
+  // 图库管理页：在当前搜索结果里翻
+  if (S.tab === 'library') {
+    const list = LIB.items || [];
+    if (!list.length) return;
+    let i = list.findIndex((x) => x.path === ZOOM.path);
+    if (i < 0) i = 0;
+    const j = Math.min(list.length - 1, Math.max(0, i + d));
+    if (j === i) return;
+    const p = list[j].path;
     ZOOM.s = 1;
     ZOOM.tx = 0;
     ZOOM.ty = 0;
@@ -4022,7 +4057,7 @@ function bindUpdate() {
  *   · 自然在线 —— 右边本来就有相册列表，左栏要留给本机文件夹树（拖文件夹上传要用）
  */
 function syncSrcAvailability(tab) {
-  const statsLock = tab === 'stats' || tab === 'archive';
+  const statsLock = tab === 'stats' || tab === 'archive' || tab === 'library';
   const natLock = tab === 'nature';
   const locked = statsLock || natLock;
   const seg = $('srcSeg');
@@ -4041,6 +4076,280 @@ function syncSrcAvailability(tab) {
   return locked;
 }
 
+/* ---------------- 图库管理：全库索引 / 搜索 / 重复文件 ---------------- */
+
+function libDate(ms) {
+  const n = Number(ms) || 0;
+  if (!n) return '';
+  const d = new Date(n);
+  if (Number.isNaN(d.getTime())) return '';
+  const p = (x) => String(x).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+function libCardHtml(it) {
+  const label = [it.cn, it.latin].filter(Boolean).join(' ') || it.name;
+  const sub = [it.folder || '根目录', it.size ? kb(it.size) : '', libDate(it.date)].filter(Boolean).join(' · ');
+  return `<div class="card" data-p="${esc(it.path)}" title="${esc(it.path)}">
+    <div class="thumb" title="单击在标注页打开；点右下角放大镜看大图">
+      <img loading="lazy" decoding="async" draggable="false" src="/img?path=${enc(it.path)}&amp;thumb=1" alt="">
+      ${zoomBtnHtml(it.path)}
+    </div>
+    <div class="meta"><div class="nm" title="${esc(label)}">${esc(label)}</div><div class="sz" title="${esc(it.path)}">${esc(sub)}</div></div>
+  </div>`;
+}
+
+function libStatusText() {
+  const st = LIB.status;
+  const el = $('libStat');
+  if (!el) return;
+  if (!st || !st.hasIndex) {
+    el.textContent = '还没有索引；先填根文件夹，点「建立 / 更新索引」';
+    return;
+  }
+  el.textContent = `索引 ${st.total} 张 · ${shortenPath(st.root)} · ${libDate(st.scannedAt)} · 当前 ${LIB.total} 条`;
+}
+
+function libRender() {
+  const grid = $('libGrid');
+  if (!grid) return;
+  grid.innerHTML = (LIB.items || []).map(libCardHtml).join('');
+  grid.hidden = !LIB.items.length;
+  const empty = $('libEmpty');
+  if (!LIB.items.length) {
+    empty.hidden = false;
+    empty.innerHTML = LIB.status && LIB.status.hasIndex
+      ? '<b>没有匹配的照片</b>换个关键词或筛选条件试试'
+      : '<b>先建立图库索引</b>填一个根文件夹，程序只读标签和文件名，不改图片';
+  } else {
+    empty.hidden = true;
+  }
+  if ($('libMoreBox')) $('libMoreBox').hidden = !LIB.items.length || LIB.items.length >= LIB.total;
+  libStatusText();
+}
+
+async function libOpen() {
+  try {
+    LIB.status = await api('/api/library/status');
+    if (LIB.status.root) $('libRoot').value = LIB.status.root;
+    else if (!$('libRoot').value) $('libRoot').value = S.dir || (S.state && S.state.lastDir) || '';
+    libStatusText();
+    if (LIB.status.hasIndex) await libSearch();
+    else { LIB.items = []; LIB.byPath.clear(); LIB.total = 0; libRender(); }
+  } catch (err) {
+    toast('图库状态读取失败：' + err.message, 3800);
+  }
+}
+
+async function libSearch(append = false) {
+  if (LIB.busy) return;
+  try {
+    LIB.q = String($('libQ').value || '').trim();
+    LIB.filter = $('libFilter').value || 'all';
+    const offset = append ? LIB.items.length : 0;
+    const r = await api(`/api/library/search?q=${enc(LIB.q)}&filter=${enc(LIB.filter)}&limit=200&offset=${offset}`);
+    const items = r.items || [];
+    LIB.items = append ? LIB.items.concat(items) : items;
+    LIB.total = Number(r.total) || 0;
+    LIB.byPath = new Map(LIB.items.map((it) => [it.path, it]));
+    if (!append) $('libDup').hidden = true;
+    libRender();
+  } catch (err) {
+    toast('图库搜索失败：' + err.message, 3800);
+  }
+}
+
+function libProgress(j) {
+  const box = $('libProgress');
+  const bar = $('libBar');
+  const txt = $('libPText');
+  if (!box || !bar || !txt) return;
+  box.hidden = false;
+  const total = Number(j.total) || 0;
+  const done = Number(j.done) || 0;
+  const pct = total ? Math.min(100, Math.round((done / total) * 100)) : (j.phase === 'walking' ? 4 : 0);
+  bar.style.width = `${pct}%`;
+  const phase = j.phase === 'walking' ? '列文件'
+    : j.phase === 'read' ? '读标签'
+      : j.phase === 'hashing' ? '算重复哈希'
+        : j.phase === 'done' ? '完成' : '准备';
+  const cur = j.current ? ` · ${String(j.current).split(/[\\/]/).pop()}` : '';
+  txt.textContent = `${phase} ${done}${total ? '/' + total : ''}${cur}`;
+}
+
+async function libPoll() {
+  if (!LIB.job) return;
+  const endpoint = LIB.kind === 'duplicates'
+    ? `/api/library/duplicates/${enc(LIB.job)}`
+    : `/api/library/scan/${enc(LIB.job)}`;
+  let j;
+  try {
+    j = await api(endpoint);
+  } catch (err) {
+    LIB.busy = false;
+    LIB.job = '';
+    $('libCancelBtn').hidden = true;
+    $('libProgress').hidden = true;
+    toast('图库任务失败：' + err.message, 4200);
+    return;
+  }
+  libProgress(j);
+  if (j.status === 'done') {
+    LIB.busy = false;
+    LIB.job = '';
+    $('libCancelBtn').hidden = true;
+    $('libProgress').hidden = true;
+    if (LIB.kind === 'scan') {
+      LIB.status = await api('/api/library/status');
+      toast(`索引完成：${LIB.status.total} 张照片`, 3000);
+      await libSearch();
+    } else {
+      LIB.dups = j.result || { groups: [] };
+      libRenderDups();
+      toast(`重复文件检查完成：${LIB.dups.groups.length} 组`, 3000);
+    }
+    return;
+  }
+  if (j.status === 'error') {
+    LIB.busy = false;
+    LIB.job = '';
+    $('libCancelBtn').hidden = true;
+    $('libProgress').hidden = true;
+    toast('图库任务失败：' + (j.error || '未知错误'), 4200);
+    return;
+  }
+  if (j.status === 'cancelled') {
+    LIB.busy = false;
+    LIB.job = '';
+    $('libCancelBtn').hidden = true;
+    $('libProgress').hidden = true;
+    toast('已取消', 2200);
+    return;
+  }
+  LIB.timer = setTimeout(libPoll, 400);
+}
+
+async function libScan() {
+  if (LIB.busy) return;
+  const root = String($('libRoot').value || '').trim();
+  if (!root) return toast('先填要索引的根文件夹');
+  LIB.busy = true;
+  LIB.dups = null;
+  $('libDup').hidden = true;
+  $('libCancelBtn').hidden = false;
+  $('libProgress').hidden = false;
+  $('libBar').style.width = '2%';
+  $('libPText').textContent = '准备扫描…';
+  try {
+    const r = await post('/api/library/scan', { root });
+    LIB.job = r.id;
+    LIB.kind = 'scan';
+    libPoll();
+  } catch (err) {
+    LIB.busy = false;
+    $('libCancelBtn').hidden = true;
+    $('libProgress').hidden = true;
+    toast('建立索引失败：' + err.message, 4200);
+  }
+}
+
+async function libCancel() {
+  if (!LIB.job) return;
+  try {
+    await post(`/api/library/${LIB.kind === 'duplicates' ? 'duplicates' : 'scan'}/${enc(LIB.job)}/cancel`, {});
+    $('libCancelBtn').disabled = true;
+    $('libPText').textContent = '正在取消…';
+  } catch (err) {
+    toast('取消失败：' + err.message, 3000);
+  }
+}
+
+async function libFindDups() {
+  if (LIB.busy) return;
+  if (!LIB.status || !LIB.status.hasIndex) return toast('先建立图库索引');
+  LIB.busy = true;
+  LIB.dups = null;
+  $('libDup').hidden = true;
+  $('libCancelBtn').hidden = false;
+  $('libProgress').hidden = false;
+  $('libBar').style.width = '2%';
+  $('libPText').textContent = '准备查找重复文件…';
+  try {
+    const r = await post('/api/library/duplicates', {});
+    LIB.job = r.id;
+    LIB.kind = 'duplicates';
+    libPoll();
+  } catch (err) {
+    LIB.busy = false;
+    $('libCancelBtn').hidden = true;
+    $('libProgress').hidden = true;
+    toast('查找重复文件失败：' + err.message, 4200);
+  }
+}
+
+function libRenderDups() {
+  const box = $('libDup');
+  if (!box) return;
+  const groups = (LIB.dups && LIB.dups.groups) || [];
+  box.hidden = false;
+  box.innerHTML = `<div class="lib-dup-head"><b>重复文件</b><span>${groups.length} 组 · 内容完全相同（SHA-256）</span><span style="flex:1"></span><button class="ghost mini" data-close="1">关闭</button></div>` +
+    groups.map((g) => `<div class="lib-dup-group">
+      <div class="lib-dup-title">${g.items.length} 份 · 每份 ${kb(g.size)} · 最多可省 ${kb(g.wasted)}</div>
+      <div class="lib-dup-items">${g.items.map((it) => {
+        const label = [it.cn, it.latin].filter(Boolean).join(' ') || it.name;
+        return `<div class="lib-dup-item">
+          <img loading="lazy" src="/img?path=${enc(it.path)}&amp;thumb=1" alt="">
+          <div><div class="nm" title="${esc(it.path)}">${esc(label)}</div><div class="p" title="${esc(it.path)}">${esc(it.path)}</div></div>
+          <div class="lib-dup-actions"><button class="ghost mini" data-d="${esc(it.dir)}">打开</button><button class="ghost mini" data-z="${esc(it.path)}">看图</button></div>
+        </div>`;
+      }).join('')}</div>
+    </div>`).join('');
+  if (!groups.length) box.innerHTML = '<div class="lib-dup-head"><b>没有发现内容完全相同的文件</b><span>当前索引范围内按大小 + SHA-256 比对</span><span style="flex:1"></span><button class="ghost mini" data-close="1">关闭</button></div>';
+  libStatusText();
+}
+
+async function libOpenFolder(dir) {
+  if (!dir) return;
+  showTab('annotate');
+  await loadDir(dir);
+}
+
+function bindLibrary() {
+  if (LIB.bound) return;
+  LIB.bound = true;
+  if ($('libScanBtn')) $('libScanBtn').onclick = libScan;
+  if ($('libUseCur')) $('libUseCur').onclick = () => {
+    if (S.dir) $('libRoot').value = S.dir;
+    else toast('左边还没有选中文件夹');
+  };
+  if ($('libSearchBtn')) $('libSearchBtn').onclick = libSearch;
+  if ($('libQ')) $('libQ').onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); libSearch(); } };
+  if ($('libFilter')) $('libFilter').onchange = libSearch;
+  if ($('libDupBtn')) $('libDupBtn').onclick = libFindDups;
+  if ($('libMoreBtn')) $('libMoreBtn').onclick = () => libSearch(true);
+  if ($('libCancelBtn')) $('libCancelBtn').onclick = libCancel;
+  if ($('libGrid')) $('libGrid').onclick = (e) => {
+    const card = e.target.closest('.card[data-p]');
+    if (!card) return;
+    const p = card.dataset.p;
+    if (e.target.closest('.zoom-btn')) {
+      e.preventDefault();
+      S.active = p;
+      openZoom();
+      return;
+    }
+    const it = LIB.byPath.get(p);
+    if (it) libOpenFolder(it.dir);
+  };
+  if ($('libDup')) $('libDup').onclick = (e) => {
+    if (e.target.closest('[data-close]')) { $('libDup').hidden = true; return; }
+    const open = e.target.closest('[data-d]');
+    if (open) { libOpenFolder(open.dataset.d); return; }
+    const z = e.target.closest('[data-z]');
+    if (z) { S.active = z.dataset.z; openZoom(); }
+  };
+}
+
 function showTab(name) {
   S.tab = name;
   // 归档 / 统计 / 自然在线页：进页面就回到本机端（切走后不会自动跳回相册端）
@@ -4052,15 +4361,17 @@ function showTab(name) {
     archive: $('archiveView'),
     nature: $('natView'),
     score: $('scoreView'),
+    library: $('libraryView'),
   };
   // 统计、归档、自然在线、照片评分都是「整块占用」的视图，右边那块标注面板收起来
-  lay.classList.toggle('stats-mode', name === 'stats' || name === 'archive' || name === 'nature' || name === 'score');
+  lay.classList.toggle('stats-mode', name === 'stats' || name === 'archive' || name === 'nature' || name === 'score' || name === 'library');
   for (const [k, el] of Object.entries(views)) if (el) el.classList.toggle('on', k === name);
   [...$('tabs').children].forEach((b) => b.classList.toggle('on', b.dataset.tab === name));
   if (name === 'stats') statsOpen();
   if (name === 'archive') runArchiveTab();
   if (name === 'nature') natOpen();
   if (name === 'score') scoreOpen();
+  if (name === 'library') libOpen();
 }
 
 function bindTabs() {
