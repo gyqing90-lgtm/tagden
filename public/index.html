@@ -209,9 +209,11 @@
               <button id="natLocalOpen" class="ghost mini" title="回到「标注」页打开这个文件夹">去标注页</button>
             </span>
             <span class="nat-acts" id="natAlbumActs" hidden>
+              <button id="natBatchBtn" class="primary mini" disabled title="把勾选的多张照片统一鉴定成同一个物种，只提交名字，不重传图片">批量鉴定</button>
               <button id="natReIdBtn" class="primary mini" title="把本机写好的鉴定结果同步到自然在线：只传鉴定结果，不传图片、不新增照片；传完重新读取站点返回的新名字">重新鉴定上传 <b id="natPendingTag">0</b></button>
               <button id="natOrigBtn" class="ghost mini" disabled title="把勾选（或本页全部）照片的真·原图打包成 zip 下载到本机">下载原图</button>
               <button id="natKmlBtn" class="ghost mini" disabled title="用勾选（或本页全部）照片里的 GPS 生成 KML 轨迹：连线 + 每个照片一个点">下载 KML 轨迹</button>
+              <button id="natDelBtn" class="ghost mini nat-del" disabled title="删除勾选的照片；会同步删除自然在线上的原图，删后不能恢复">删除照片</button>
             </span>
             <button id="natClearCacheBtn" class="ghost mini" title="清除本机缓存的自然在线图片；鉴定记录、评分记录、账号登录都不受影响，下次打开会重新从站点读取">清除缓存</button>
           </div>
@@ -694,7 +696,9 @@
     <div class="nw-batch" id="nwBatchBox" hidden>
       <label class="nw-field"><span>中文名</span><input id="nwChinese" type="text" spellcheck="false" placeholder="如：碧凤蝶"></label>
       <label class="nw-field"><span>学名</span><input id="nwLatin" type="text" spellcheck="false" placeholder="如：Papilio bianor"></label>
+      <button id="nwAutoBtn" class="ghost mini" type="button" title="根据已填的中文名或学名，从物种名录补齐另一侧">自动识别</button>
     </div>
+    <div class="ne-auto-msg" id="nwAutoMsg" hidden></div>
     <div class="nw-taxa">
       <div class="nw-taxa-h">分类库匹配：留空则按每张的名字自动检索；点亮一条可锁定 NameID，应用到全部</div>
       <div class="nw-taxa-bar">

@@ -1220,6 +1220,59 @@ function neField(labelText, cls, value, placeholder) {
   return { wrap, input };
 }
 
+/**
+ * 自动补名字：用户只填中文名或只填学名时，从内置《中国生物物种名录》/ 自然在线分类库
+ * 补另一侧。只补空着的一侧，不覆盖用户已经写的；两侧都填就不动。
+ */
+async function autoFillNames(cnInput, laInput, btn, msgEl) {
+  const cn = String((cnInput && cnInput.value) || '').trim();
+  const latin = String((laInput && laInput.value) || '').trim();
+  const say = (text, cls) => {
+    if (!msgEl) return;
+    msgEl.textContent = text || '';
+    msgEl.className = `ne-auto-msg${cls ? ' ' + cls : ''}`;
+  };
+  if (!cn && !latin) {
+    say('先填中文名或拉丁名，再点自动识别', 'bad');
+    return;
+  }
+  if (cn && latin) {
+    say('两侧都已填写；如需核对请直接保存', '');
+    return;
+  }
+  if (!btn) return;
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '识别中…';
+  say('正在查物种名录…', '');
+  try {
+    const out = await post('/api/species/complete', {
+      items: [{ key: 'name-edit', cn, latin }],
+      online: true,
+    });
+    const it = (out.items || [])[0] || {};
+    let filled = false;
+    if (!cn && it.fillCn) { cnInput.value = it.fillCn; filled = true; }
+    if (!latin && it.fillLatin) { laInput.value = it.fillLatin; filled = true; }
+    if (filled) {
+      const from = it.source || '物种名录';
+      say(`已从${from}补齐，可直接保存`, 'ok');
+      if (!cn && laInput.focus) laInput.focus();
+      else if (!latin && cnInput.focus) cnInput.focus();
+    } else if (it.state === 'ambiguous') {
+      const n = (it.candidates || []).length;
+      say(n ? `名录里有 ${n} 个同名候选，请手动选择` : (it.note || '名录里有多个同名，请手动填写'), 'bad');
+    } else {
+      say(it.note || '名录里没找到，请检查名字或手动填写', 'bad');
+    }
+  } catch (err) {
+    say('自动识别失败：' + err.message, 'bad');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
+  }
+}
+
 function openNameEditor(p, anchor) {
   closeNameEditor();
   const files = Array.isArray(S.files) ? S.files : [];
@@ -1249,6 +1302,19 @@ function openNameEditor(p, anchor) {
   const la = neField('拉丁名', 'ne-la', pair.latin, '如：Papilio bianor');
   box.appendChild(cn.wrap);
   box.appendChild(la.wrap);
+  const autoRow = document.createElement('div');
+  autoRow.className = 'ne-auto-row';
+  const autoBtn = document.createElement('button');
+  autoBtn.type = 'button';
+  autoBtn.className = 'ghost mini ne-auto';
+  autoBtn.textContent = '自动识别';
+  autoBtn.title = '只填一侧时，从物种名录补齐另一侧';
+  const autoMsg = document.createElement('span');
+  autoMsg.className = 'ne-auto-msg';
+  autoRow.appendChild(autoBtn);
+  autoRow.appendChild(autoMsg);
+  box.appendChild(autoRow);
+  autoBtn.onclick = () => autoFillNames(cn.input, la.input, autoBtn, autoMsg);
   const tip = document.createElement('div');
   tip.className = 'ne-tip';
   tip.textContent = album
@@ -5103,6 +5169,9 @@ function natSyncSel() {
   $('natSelInfo').textContent = n ? `已选 ${n} 张` : '';
   const reid = $('natReIdBtn');
   if (reid) reid.disabled = false; // 读本机待上传记录，不依赖当前勾选
+  const busy = Boolean(NAT.upl) || NAT.idRunning;
+  if ($('natBatchBtn')) $('natBatchBtn').disabled = localMode || !n || busy;
+  if ($('natDelBtn')) $('natDelBtn').disabled = localMode || !n || busy;
   // 下载类只在相册端可用；没勾选就按本页全部处理，所以只要本页有照片就能点
   const hasPhotos = !localMode && (NAT.photos || []).length > 0;
   if ($('natOrigBtn')) $('natOrigBtn').disabled = !hasPhotos;
@@ -5353,6 +5422,7 @@ function nwOpen(opts) {
   $('nwLatin').value = '';
   $('nwKw').value = '';
   $('nwErr').textContent = '';
+  if ($('nwAutoMsg')) $('nwAutoMsg').textContent = '';
   $('nwClearLock').hidden = true;
   $('nwLocked').hidden = true;
   $('nwTaxaList').innerHTML = '<div class="empty">输入中文名或学名后点「检索」；留空则提交时按每张的名字自动匹配。</div>';
@@ -5384,6 +5454,8 @@ async function nwOpenReId() {
 
 /** 当前勾选的站点照片 id：标注页相册端优先，其次自然在线页里勾的照片 */
 function nwPickedIds() {
+  // 自然在线页的勾选在 NAT.sel；别拿标注页隐藏的 S.sel 去串台
+  if (S.tab === 'nature') return NAT.side === 'album' ? [...NAT.sel] : [];
   const tagPicked = [...S.sel].filter(isNatKey).map((k) => k.slice(NAT_KEY.length));
   return tagPicked.length ? tagPicked : [...NAT.sel];
 }
@@ -5419,6 +5491,7 @@ function nwClose() {
 function nwSyncBatch() {
   const on = $('nwBatch').checked;
   $('nwBatchBox').hidden = !on;
+  if ($('nwAutoMsg')) $('nwAutoMsg').hidden = !on;
   document.querySelector('.sheet.nw').classList.toggle('batch', on);
   if (on && !$('nwChinese').value && !$('nwLatin').value) {
     const first = NW.rows.find((r) => r.checked) || NW.rows[0];
@@ -5647,8 +5720,10 @@ async function nwSubmit() {
 
 function nwBind() {
   if ($('natReIdBtn')) $('natReIdBtn').onclick = nwOpenReId;
-  // 批量鉴定搬到「标注」页相册端：自然在线页只管上传 / 下载
   if ($('tagBatchBtn')) $('tagBatchBtn').onclick = nwOpenBatch;
+  if ($('natBatchBtn')) $('natBatchBtn').onclick = nwOpenBatch;
+  if ($('natDelBtn')) $('natDelBtn').onclick = natDeleteSelected;
+  if ($('nwAutoBtn')) $('nwAutoBtn').onclick = () => autoFillNames($('nwChinese'), $('nwLatin'), $('nwAutoBtn'), $('nwAutoMsg'));
   if ($('natReIdShortcut')) $('natReIdShortcut').onclick = nwOpenReId;
   $('nwCancel').onclick = nwClose;
   $('nwBatch').onchange = nwSyncBatch;
@@ -5884,6 +5959,34 @@ async function natHandlePathsDrop(paths, target) {
   if (ok && ok.ok !== false) {
     await natLoadAlbums();
     if (NAT.album && String(NAT.album.id) === String(albumId)) await natLoadPhotos();
+  }
+}
+
+/**
+ * 删除自然在线相册里勾选的照片：站点原生删除，原图一起消失，确认后才发。
+ * 删当前页最后几张时把页码收回来，避免停在空页。
+ */
+async function natDeleteSelected() {
+  if (!NAT.loggedIn) return toast('先在「自然在线」页登录');
+  const ids = [...NAT.sel];
+  if (!ids.length) return toast('先勾选要删除的照片');
+  if (!window.confirm(`删除勾选的 ${ids.length} 张照片？\n会同步删除自然在线上的原图，删后不能恢复。`)) return;
+  try {
+    const r = await post('/api/nat/photos/delete', { ids });
+    NAT.sel.clear();
+    await natLoadAlbums();
+    if (NAT.album) {
+      await natLoadPhotos();
+      const pages = Math.max(1, Math.ceil(NAT.total / NAT.size));
+      if (NAT.page > pages) {
+        NAT.page = pages;
+        await natLoadPhotos();
+      }
+    }
+    natSyncSel();
+    toast(`已删除 ${r.deleted != null ? r.deleted : ids.length} 张，并同步到自然在线`, 3200);
+  } catch (err) {
+    toast('删除失败：' + err.message, 4200);
   }
 }
 

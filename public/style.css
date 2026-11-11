@@ -1649,6 +1649,8 @@ body.resizing {
 .nat-photos .card[draggable="true"]:active { cursor: grabbing; }
 .nat-photos .card[draggable="true"] .thumb { cursor: grab; }
 .nat-photos .card[draggable="true"] .zoom-btn { cursor: zoom-in; }
+#natDelBtn { color: var(--red); }
+#natDelBtn:not(:disabled):hover { background: #fbefed; border-color: #e8c8c4; }
 .nat-photos .card.folder .thumb { cursor: grab; }
 .nat-drag-mark {
   position: absolute;
@@ -2451,7 +2453,9 @@ body.resizing {
 .nw-chk { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; cursor: pointer; }
 .nw-bar > button, .nw-taxa-bar > button { flex: 0 0 auto; white-space: nowrap; }
 .nw-taxa-bar > button[hidden] { display: none !important; }
-.nw-batch { display: flex; gap: 10px; margin-bottom: 10px; }
+.nw-batch { display: flex; align-items: flex-end; gap: 10px; margin-bottom: 10px; }
+#nwAutoBtn { flex: 0 0 auto; margin-bottom: 1px; }
+#nwAutoMsg { margin: -4px 0 8px; }
 .nw-batch[hidden] { display: none !important; }
 .nw-field { flex: 1 1 0; display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; color: var(--ink-3); }
 .nw input[type="text"] {
@@ -2587,6 +2591,10 @@ button.accent:disabled { opacity: .55; }
 .ne-field span { width: 48px; flex: 0 0 auto; color: var(--ink-3); }
 .ne-field input { flex: 1; min-width: 0; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; font-size: 13px; }
 .ne-tip { font-size: 11px; color: var(--ink-3); line-height: 1.6; margin: 6px 0 9px; }
+.ne-auto-row { display: flex; align-items: center; gap: 8px; margin: 2px 0 4px; }
+.ne-auto-msg { font-size: 11px; color: var(--ink-3); line-height: 1.4; min-height: 15px; }
+.ne-auto-msg.ok { color: var(--green-d); }
+.ne-auto-msg.bad { color: var(--red); }
 .ne-acts { display: flex; justify-content: flex-end; gap: 8px; }
 
 /* ---------- 物种名核对 ---------- */
