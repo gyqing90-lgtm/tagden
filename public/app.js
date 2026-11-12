@@ -51,6 +51,7 @@ const S = {
   opt: { rename: false, order: 'first', pick: 'cn', suffix: '' },
   // 照片从哪来：local=本机文件夹，album=自然在线账号里的相册（走 S.files 的伪文件）
   mode: 'local',
+  marqMoved: false, // 刚框选完，紧跟的那次 click 要吞掉（否则会把框到的又取消）
   albumPick: null, // 相册端右侧面板选中的候选
   localSnap: null, // 切到相册端时存的本机快照，切回来原样还回去
 };
@@ -1059,8 +1060,8 @@ function zoomBtnHtml(key) {
 
 function cardHtml(f) {
   return `<div class="card${S.sel.has(f.path) ? ' sel' : ''}${S.active === f.path ? ' active' : ''}" data-p="${esc(f.path)}">
-        <div class="thumb" title="单击选中；点右下角放大镜看大图；点左上角圆圈勾选">
-          <img loading="lazy" decoding="async" class="${rotCls(f.orient)}" src="/img?path=${enc(f.path)}&amp;thumb=1" alt="">
+        <div class="thumb" title="单击选中；在空白处或照片上按住拖出方框可批量框选；点右下角放大镜看大图">
+          <img loading="lazy" decoding="async" draggable="false" class="${rotCls(f.orient)}" src="/img?path=${enc(f.path)}&amp;thumb=1" alt="">
           <span class="tick" title="单击勾选">${S.sel.has(f.path) ? '✓' : ''}</span>
           ${badgeOf(f)}
           ${scoreBadge(f)}
@@ -1166,11 +1167,14 @@ function render() {
   updateDirStat();
   renderPager(view);
   const total = list.length + showDirs.length;
-  $('empty').hidden = total > 0;
-  if (!total) {
+  // 空文件夹不再出提示：一层里既没子文件夹也没图片，本身就是「没东西」，
+  // 再来一块虚线大框说「这个文件夹是空的」只是噪音。
+  // 筛选类提示（为什么看不到图）仍然保留，它们解释的是筛选结果，不是空目录。
+  const blank = !S.files.length;
+  $('empty').hidden = total > 0 || blank;
+  if (!total && !blank) {
     let msg;
-    if (!S.files.length) msg = '<b>这个文件夹是空的</b>没有子文件夹，也没有图片';
-    else if (S.filter === 'nolatin')
+    if (S.filter === 'nolatin')
       msg = S.dirs.length
         ? `<b>这一层的图都有学名了</b>还有 ${S.dirs.length} 个子文件夹，可能有没标的，切到「全部」点进去看看`
         : '<b>这个文件夹里的图都有学名了</b>标签或文件名里已经写了学名，不用再识别了';
@@ -1276,9 +1280,114 @@ function activateCard(p) {
   openPanel(p);
 }
 
+/**
+ * 点照片本身 = 选中这一张（替换掉原来的勾选），右侧跟着显示详情。
+ * 卡片上的提示写的就是「单击选中」，所以这里必须真的落到 S.sel 里，
+ * 否则点完照片「识别选中」还是 0 张、按钮一直灰着（相册端尤其明显）。
+ * 要复选多张就点左上角的小圆圈，那里走 toggle()，不会清掉别的。
+ */
+function selectOnly(p) {
+  const prev = [...S.sel];
+  S.sel.clear();
+  S.sel.add(p);
+  S.active = p;
+  for (const q of prev) if (q !== p) patchCard(q);
+  patchCard(p);
+  updateCount();
+  openPanel(p);
+}
+
+/** 把 S.sel 刷到网格里的每张照片卡上（文件夹卡不参与勾选） */
+function syncGridSel() {
+  const grid = $('grid');
+  if (!grid) return;
+  for (const card of grid.querySelectorAll('.card[data-p]')) {
+    const p = card.dataset.p;
+    if (!p || card.classList.contains('folder')) continue;
+    const on = S.sel.has(p);
+    if (card.classList.contains('sel') !== on) card.classList.toggle('sel', on);
+    const tk = card.querySelector('.tick');
+    if (tk) {
+      const want = on ? '✓' : '';
+      if (tk.textContent !== want) tk.textContent = want;
+    }
+  }
+  updateCount();
+  if (S.mode === 'album') renderAlbumPager();
+}
+
+/**
+ * 标注页 / 相册端：按住拖出一个矩形，框住的照片全部勾上，用来批量识别 / 批量鉴定。
+ * 和自然在线、照片评分是同一套手感（document 级 move/up，别用 setPointerCapture）：
+ *   · 移动不足 4px 当作单击，照旧只选这一张；
+ *   · 超过就进框选，再用 S.marqMoved 吞掉松手后紧跟的那次 click；
+ *   · Shift / Ctrl / ⌘ 按住拖是在已有勾选上追加，松手不会清掉原来的；
+ *   · 文件夹卡上按下不画框（那是「进子文件夹」），照片卡上可以直接起笔。
+ */
+function bindGridMarquee(grid) {
+  if (!grid) return;
+  grid.onpointerdown = (e) => {
+    S.marqMoved = false; // 上一轮没消费掉的标记在这里复位，别用定时器猜
+    if (e.button !== 0 || e.pointerType === 'touch') return;
+    if (S.queue > 0) return; // 识别进行中别画框
+    const startCard = e.target.closest ? e.target.closest('.card') : null;
+    if (startCard && startCard.classList.contains('folder')) return;
+    // 大图按钮、勾选小圆圈、名称区双击都各有自己的语义，别被框选抢走
+    if (e.target.closest('.zoom-btn')) return;
+    scClearTextSelection();
+    const additive = e.shiftKey || e.ctrlKey || e.metaKey;
+    const base = additive ? new Set(S.sel) : new Set();
+    const box = document.createElement('div');
+    box.className = 'sc-marquee';
+    document.body.appendChild(box);
+    grid.classList.add('dragging');
+    const x0 = e.clientX; const y0 = e.clientY;
+    let moved = false;
+    const onMove = (ev) => {
+      const dx = ev.clientX - x0; const dy = ev.clientY - y0;
+      if (!moved && Math.abs(dx) + Math.abs(dy) < 4) return;
+      moved = true;
+      const l = Math.min(x0, ev.clientX); const t = Math.min(y0, ev.clientY);
+      const w = Math.abs(dx); const h = Math.abs(dy);
+      box.style.left = `${l}px`; box.style.top = `${t}px`;
+      box.style.width = `${w}px`; box.style.height = `${h}px`;
+      const hits = new Set(base);
+      for (const card of grid.querySelectorAll('.card[data-p]')) {
+        const p = card.dataset.p;
+        if (!p || card.classList.contains('folder')) continue;
+        const r = card.getBoundingClientRect();
+        if (!r.width && !r.height) continue; // 没排版的节点当作不在框里
+        if (r.right < l || r.left > l + w || r.bottom < t || r.top > t + h) continue;
+        hits.add(p);
+      }
+      S.sel = hits;
+      syncGridSel();
+    };
+    const onUp = () => {
+      document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', onUp);
+      document.removeEventListener('pointercancel', onUp);
+      box.remove();
+      grid.classList.remove('dragging');
+      if (moved) S.marqMoved = true;
+      else if (!startCard && !additive) {
+        // 在空白处点一下：清空勾选（和另外两页一致）
+        S.sel.clear();
+        syncGridSel();
+      }
+    };
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', onUp);
+    document.addEventListener('pointercancel', onUp);
+  };
+}
+
 /** 本机端 / 相册端共用一套网格事件 */
 function bindGridEvents(grid, withFolders) {
+  bindGridMarquee(grid);
   grid.onclick = (e) => {
+    // 刚框选完：吞掉这次 click，别把框到的又取消掉
+    if (S.marqMoved) { S.marqMoved = false; return; }
     if (withFolders) {
       const folder = e.target.closest('.card.folder');
       if (folder) { loadDir(folder.dataset.d); return; }
@@ -1294,9 +1403,10 @@ function bindGridEvents(grid, withFolders) {
       return;
     }
     if (e.target.closest('.thumb')) {
-      // 小圆圈和状态徽标仍是勾选；点照片本身 = 选中
+      // 小圆圈和状态徽标仍是勾选开关；点照片本身 = 选中这一张（按住 Shift 就是加减）
       if (e.target.closest('.tick') || e.target.closest('.badge')) { toggle(p); return; }
-      activateCard(p);
+      if (e.shiftKey || e.ctrlKey || e.metaKey) { toggle(p); return; }
+      selectOnly(p);
       return;
     }
     if (e.detail > 1) return; // 双击的第二下不要重复勾选
@@ -5452,8 +5562,8 @@ function albumCardHtml(f) {
   const orig = [p.cname, p.lname].filter(Boolean).join(' ');
   const sub = orig || [p.date, p.place].filter(Boolean).join(' · ') || (f.size ? kb(f.size) : '站点未命名');
   return `<div class="card${on ? ' sel' : ''}${act ? ' active' : ''}" data-p="${esc(f.path)}">
-        <div class="thumb" title="单击选中；点右下角放大镜看大图；点左上角圆圈勾选">
-          <img loading="lazy" decoding="async" src="/api/nat/img?u=${enc(p.thumb || p.full || '')}" alt="">
+        <div class="thumb" title="单击选中；在空白处或照片上按住拖出方框可批量框选；点右下角放大镜看大图">
+          <img loading="lazy" decoding="async" draggable="false" src="/api/nat/img?u=${enc(p.thumb || p.full || '')}" alt="">
           <span class="tick" title="单击勾选">${on ? '✓' : ''}</span>
           ${zoomBtnHtml(f.path)}
         </div>
@@ -7646,6 +7756,30 @@ function bindNoTextSelect() {
  * 工具条上的「启动本地服务 / 专用昆虫检测」：不打开 AI 设置也能直接用。
  * 状态跟 scLlamaStatus / scCfgPaint 同步过去。
  */
+/**
+ * 类群短名，用来拼「（进阶）专用植物检测」这类文案。
+ * 「通用(自动判断)」没有专属判据 → 空串，前端据此置灰那个勾选框。
+ */
+const SC_TAXON_SHORT = {
+  '昆虫': '昆虫', '鸟类': '鸟类', '植物': '植物', '兽类': '兽类', '两栖爬行动物': '两栖爬行',
+};
+function scTaxonShort(t) {
+  const s = String(t || '').replace(/[（(].*?[)）]/g, '').trim();
+  return SC_TAXON_SHORT[s] || '';
+}
+
+/** 把「专用×检测」那个勾选框的文案/提示按当前类群刷新 */
+function scStrictLabel(wrapId, txtId, short) {
+  const wrap = $(wrapId);
+  const txt = $(txtId);
+  if (txt) txt.textContent = short ? `（进阶）专用${short}检测` : '（进阶）专用检测';
+  if (!wrap) return;
+  wrap.classList.toggle('off', !short);
+  wrap.title = short
+    ? `进阶：按${short}的鉴定标准严格评审（逐项检查该类群的鉴定关键部位，至少两处清晰才判「清晰」）`
+    : '「通用(自动判断)」没有专属判据：把评分对象换成具体类群（昆虫 / 鸟类 / 植物 / 兽类 / 两栖爬行动物）后可用';
+}
+
 function scQuickPaint() {
   const r = SCR.llama || {};
   const btn = $('scQuickLlama');
@@ -7658,16 +7792,10 @@ function scQuickPaint() {
   if (box && c) {
     const eng = c.engine === 'local' ? 'local' : 'cloud';
     const set = c[eng] || {};
-    box.checked = !!set.strict;
-    const insect = /昆虫/.test(set.taxon || '');
-    box.disabled = !insect;
-    const wrap = $('scQuickStrictWrap');
-    if (wrap) {
-      wrap.classList.toggle('off', !insect);
-      wrap.title = insect
-        ? '进阶：按昆虫鉴定标准严格评审（检查触角/复眼/足/翅/鞘翅等关键部位，并识别蜘蛛等非昆虫节肢动物）'
-        : '只有类群选「昆虫」时可用（在 AI 设置里把类群改成昆虫，或换一个默认就是昆虫的引擎）';
-    }
+    const short = scTaxonShort(set.taxon);
+    box.checked = !!set.strict && !!short;
+    box.disabled = !short;
+    scStrictLabel('scQuickStrictWrap', 'scQuickStrictTxt', short);
   }
 }
 
@@ -7689,7 +7817,7 @@ async function scQuickToggleLlama() {
   await scLlamaStart();
 }
 
-/** 工具条上的专用昆虫检测：写进当前生效的那个引擎（本地优先） */
+/** 工具条上的专用检测：写进当前生效的那个引擎（本地优先）；判据跟着评分对象类群走 */
 async function scQuickStrict(on) {
   if (!SCR.cfg) await scCfgLoad();
   const c = SCR.cfg || {};
@@ -7699,7 +7827,7 @@ async function scQuickStrict(on) {
     const r = await post('/api/score/ai', body);
     if (r && r.cfg) SCR.cfg = r.cfg;
   } catch (err) {
-    toast('保存专用昆虫检测设置失败：' + err.message, 3200);
+    toast('保存专用检测设置失败：' + err.message, 3200);
   }
   // 设置面板里的同名勾选框跟着走，两处不能各说各话
   if (eng === 'cloud' && $('scStrict')) $('scStrict').checked = !!on;
@@ -7820,6 +7948,8 @@ async function scAiSave(patch) {
     toast('保存 AI 设置失败：' + err.message, 3200);
   }
   if (SCR.cfg && SCR.cfg.engine !== 'off') SCR.aiLastEngine = SCR.cfg.engine;
+  // 类群改了，「（进阶）专用×检测」的文案和可用状态要立刻跟着换
+  scQuickPaint();
   // 哪个弹窗开着就重画哪个，两处不能各说各话
   if (scAnyDlgShown()) scCfgPaint();
   if (scDlgShown('scLocalMask')) scLocalListRender();
@@ -7893,6 +8023,7 @@ function scOpenLocalMgr() {
     scCfgPaint();
     scLlamaScan();
     scLlamaStatus();
+    scDlLoad();
   };
   if (!SCR.cfg) scCfgLoad().then(open);
   else open();
@@ -7923,6 +8054,131 @@ async function scLocalListRender() {
   };
 }
 
+/* ---------------- 在线下载模型：选一个，下完自动进模型目录并设为当前模型 ---------------- */
+
+let scDlTimer = 0;
+
+const scDlSize = (n) => {
+  if (!n) return '大小未知';
+  if (n >= 1073741824) return `${(n / 1073741824).toFixed(1)} GB`;
+  return `${Math.max(1, Math.round(n / 1048576))} MB`;
+};
+
+/** 拉清单并重画；有任务在跑就自己接着轮询 */
+async function scDlLoad() {
+  let r = null;
+  try { r = await api('/api/score/llama/catalog'); } catch { /* 断网就保持上一次的样子 */ }
+  if (r && r.items) SCR.dl = r;
+  scDlRender();
+  return SCR.dl;
+}
+function scDlPoll() {
+  if (scDlTimer) return;
+  scDlTimer = setTimeout(() => {
+    scDlTimer = 0;
+    if (!scDlgShown('scLocalMask')) return; // 弹窗关了就不用刷了
+    scDlLoad();
+  }, 1200);
+}
+
+async function scDlStart(id) {
+  let r = null;
+  try { r = await post('/api/score/llama/download', { id }); } catch (err) { r = { ok: false, error: err.message }; }
+  if (!r || !r.ok) { toast('开始下载失败：' + ((r && r.error) || '未知错误'), 4000); return; }
+  toast('开始下载：进度就在这一行里，下完会自动设为当前模型', 4200);
+  scDlLoad();
+}
+
+async function scDlCancel(id) {
+  try { await post('/api/score/llama/download/cancel', { id }); } catch { /* 已经停了 */ }
+  scDlLoad();
+}
+
+async function scDlRemove(id) {
+  const it = ((SCR.dl && SCR.dl.items) || []).find((x) => x.id === id);
+  if (it && it.installed && !window.confirm(`删掉「${it.label}」的模型文件？照片和评分不受影响，以后要用得重新下。`)) return;
+  let r = null;
+  try { r = await post('/api/score/llama/remove', { id }); } catch (err) { r = { ok: false, error: err.message }; }
+  if (!r || !r.ok) { toast('删除失败：' + ((r && r.error) || '未知错误'), 3600); return; }
+  if (SCR.dlSeen) SCR.dlSeen.delete(id);
+  await scLlamaScan();
+  scDlLoad();
+}
+
+/**
+ * 下载完成后的收尾：重新扫模型 → 本机还没有「在用」的模型就自动切成刚下好的这个。
+ * 只处理「这一轮真的从头下完」的（SCR.dlBusy 记过 running 的那些），
+ * 打开弹窗时本来就存在的模型不会触发，也不会抢用户已经选好的模型。
+ */
+async function scDlAfterDone(items) {
+  const busy = SCR.dlBusy || (SCR.dlBusy = new Set());
+  const seen = SCR.dlSeen || (SCR.dlSeen = new Set());
+  for (const it of items) {
+    if (it.state === 'running') { busy.add(it.id); continue; }
+    if (it.state !== 'done' || !it.modelPath) continue;
+    if (!busy.has(it.id) || seen.has(it.id)) continue;
+    busy.delete(it.id);
+    seen.add(it.id);
+    await scLlamaScan();
+    const cur = String(((SCR.cfg && SCR.cfg.local && SCR.cfg.local.modelPath) || ''));
+    const lm = SCR.llamaModels || { mains: [] };
+    const known = lm.mains.some((f) => f.path === cur);
+    if (!cur || !known) {
+      await scAiModelSet(it.modelPath);
+      if (it.mmprojPath) await scAiSave({ local: { mmprojPath: it.mmprojPath } });
+      await scLlamaScan();
+      if ($('scMmprojSel') && it.mmprojPath) $('scMmprojSel').value = it.mmprojPath;
+      if ($('scLlamaMsg')) $('scLlamaMsg').textContent = '模型已就位，点「启动本地服务」就能用';
+      toast(`「${it.label}」下好了，已设为当前模型；点「启动本地服务」即可`, 5200);
+    } else {
+      toast(`「${it.label}」下好了，已经放进模型目录`, 4000);
+    }
+  }
+}
+
+function scDlRender() {
+  const box = $('scDlList');
+  if (!box) return;
+  const cat = SCR.dl;
+  if (!cat || !cat.items) {
+    box.innerHTML = '<div class="sc-loc-empty">读不到下载清单（检查一下网络）。也可以点上面的「打开」，自己把 .gguf 放进模型目录。</div>';
+    return;
+  }
+  if ($('scDlDir')) $('scDlDir').textContent = cat.dir ? `存到 ${cat.dir}` : '';
+  const running = cat.items.some((i) => i.state === 'running');
+  box.innerHTML = cat.items.map((it) => {
+    const pct = it.total ? Math.min(100, Math.floor((it.got / it.total) * 100)) : 0;
+    const cur = ((SCR.cfg && SCR.cfg.local && SCR.cfg.local.modelPath) || '') === it.modelPath;
+    let st = '';
+    if (it.state === 'running') {
+      st = `<span class="sc-dl-st">${pct}%｜${scDlSize(it.got)} / ${scDlSize(it.total)}`
+        + `${it.speed ? `｜${(it.speed / 1048576).toFixed(1)} MB/s` : ''}</span>`;
+    } else if (it.state === 'error') {
+      st = `<span class="sc-dl-st bad">${esc(it.error || '下载失败')}</span>`;
+    } else if (it.state === 'cancel') {
+      st = '<span class="sc-dl-st">已取消（半截文件留着，下次接着下）</span>';
+    } else if (it.installed) {
+      st = `<span class="sc-dl-st ok">已下载${cur ? ' · 当前使用' : ''}</span>`;
+    } else {
+      st = `<span class="sc-dl-st">约 ${scDlSize(it.size)}</span>`;
+    }
+    const act = it.state === 'running'
+      ? `<button class="ghost mini" data-dl-cancel="${esc(it.id)}">取消</button>`
+      : it.installed
+        ? `<button class="ghost mini" data-dl-del="${esc(it.id)}" title="删掉这个模型的文件，腾出硬盘空间">删除</button>`
+        : `<button class="primary mini" data-dl-start="${esc(it.id)}">${it.state === 'cancel' || it.state === 'error' ? '继续下载' : '下载'}</button>`;
+    return `<div class="sc-dl-item${it.installed ? ' on' : ''}${it.state === 'running' ? ' busy' : ''}" data-id="${esc(it.id)}">
+        <div class="nm"><b>${esc(it.label)}</b><span class="sub">${esc(it.note)}</span></div>
+        <div class="sc-dl-right">${st}${act}</div>
+        ${it.state === 'running' ? `<div class="sc-dl-bar"><i style="width:${pct}%"></i></div>` : ''}
+        ${it.installed ? '<div class="sc-dl-files">' + it.files.map((f) => esc(f.name)).join(' ＋ ') + '</div>' : ''}
+      </div>`;
+  }).join('');
+  // 刚下完的：自动扫进来并设为当前模型（内部用 seen 集合防止重复触发）
+  scDlAfterDone(cat.items);
+  if (running) scDlPoll();
+}
+
 function scSyncSel() {
   const n = SCR.sel.size;
   const alb = SCR.mode === 'album';
@@ -7938,10 +8194,16 @@ function scSyncSel() {
     if (b) b.disabled = alb;
   }
   if ($('scSource')) $('scSource').textContent = alb ? '相册端' : '本机端';
-  // 全选 / 清空：没有可选的照片就灰掉；顺便把「已选 N 张」写出来
+  // 全选 / 清空：这两个只管勾选，任何时候都该能用（之前挂了 SCR.running，
+  // 一次任务没收干净就会一路灰着，看着像按钮坏了）。清空本来就没有副作用。
   const onPage = scPagePaths().length;
-  if ($('scSelAll')) $('scSelAll').disabled = SCR.running || onPage === 0 || n >= onPage;
-  if ($('scSelNone')) $('scSelNone').disabled = SCR.running || n === 0;
+  const allPicked = onPage > 0 && n >= onPage;
+  if ($('scSelAll')) {
+    $('scSelAll').disabled = onPage === 0;
+    $('scSelAll').textContent = allPicked ? '取消全选' : '全选';
+    $('scSelAll').title = allPicked ? '取消当前这一屏的全部勾选' : '选中当前这一屏的全部照片';
+  }
+  if ($('scSelNone')) $('scSelNone').disabled = n === 0;
   if ($('scSelInfo')) $('scSelInfo').textContent = n ? `已选 ${n} 张` : '';
   if ($('scCompareBtn')) $('scCompareBtn').disabled = n !== 2 || SCR.running;
   // 按钮上直接写清楚这次会动几张：勾了就是勾的数量，没勾就是整层
@@ -8244,7 +8506,7 @@ function scDetailHtml(f, rec) {
     return `<div${warn}>${label} <b>${v}</b></div>`;
   }).join('');
   const aiLine = ai ? [
-    `对象:${ai.has_insect || '—'}`,
+    `对象:${ai.has_subject || ai.has_insect || '—'}`,
     ai.kind ? `实际:${ai.kind}` : '',
     ai.clarity ? `主体:${ai.clarity}` : '',
     ai.composition ? `构图:${ai.composition}` : '',
@@ -8263,7 +8525,9 @@ function scDetailHtml(f, rec) {
       <span class="sd-lab">${hasFinal ? '综合分' : '技术分'}</span>
       <span class="sd-sub">技术 ${rec.total}${ai ? ` · AI ${ai.score}` : ''}</span>
     </div>
-    ${rec.insect_strict ? '<span class="sd-strict" title="这次 AI 评审用的是昆虫鉴定标准（专用昆虫检测）">专用昆虫检测</span>' : ''}
+    ${rec.ai_taxon
+      ? `<span class="sd-strict" title="这次 AI 评审用的判据：${esc(rec.ai_taxon)}${rec.strict ? '（专用判据）' : '（通用判据）'}">${esc(rec.ai_taxon)}${rec.strict ? ' · 专用判据' : ''}</span>`
+      : (rec.insect_strict ? '<span class="sd-strict" title="旧记录：这次 AI 评审用的是昆虫鉴定标准（专用昆虫检测）">专用昆虫检测</span>' : '')}
     ${metrics ? `<div class="sd-metrics">${metrics}</div>` : ''}
     <div class="sd-ai">${ai
     ? `<div class="q">${esc(aiLine)}</div>${ai.comment ? `<div class="cmt">${esc(ai.comment)}</div>` : ''}`
@@ -8370,8 +8634,13 @@ function bindScMarquee() {
   const grid = $('scGrid');
   if (!grid) return;
   grid.addEventListener('pointerdown', (e) => {
-    if (e.button !== 0 || e.pointerType === 'touch' || SCR.running) return;
-    if (e.target.closest('.card')) return; // 卡片上按下是点选 / 进子文件夹，不画框
+    SCR.marqMoved = false; // 上一轮没消费掉的标记在这里复位，别用定时器猜
+    if (e.button !== 0 || e.pointerType === 'touch') return;
+    // 照片卡上也能直接起笔（网格铺满的时候根本没有空白处可下笔）；
+    // 文件夹卡是「进下一层」，还有右下角放大按钮，这两个不参与框选。
+    const startCard = e.target.closest ? e.target.closest('.card') : null;
+    if (startCard && startCard.classList.contains('folder')) return;
+    if (e.target.closest('.zoom-btn')) return;
     scClearTextSelection();
     const additive = e.shiftKey || e.ctrlKey || e.metaKey;
     const base = additive ? new Set(SCR.sel) : new Set();
@@ -8407,7 +8676,8 @@ function bindScMarquee() {
       grid.classList.remove('dragging');
       if (moved) {
         SCR.marqMoved = true; // 紧接着那次 click 要吞掉，否则会把刚框到的又取消
-      } else if (!additive) {
+      } else if (!startCard && !additive) {
+        // 在空白处点一下：清空勾选。点在照片上的交给 click（单击单选）
         SCR.sel = new Set();
         scSelApply();
       }
@@ -8415,7 +8685,9 @@ function bindScMarquee() {
     document.addEventListener('pointermove', onMove);
     document.addEventListener('pointerup', onUp);
     document.addEventListener('pointercancel', onUp);
-    e.preventDefault();
+    // 照片卡上按下时别 preventDefault：那会顺手把后面的 click 也压掉，
+    // 单击就不进勾选了。空白处按下才需要阻止选中文字 / 拖影。
+    if (!startCard) e.preventDefault();
   });
 }
 
@@ -8763,24 +9035,22 @@ function scCfgPaint() {
 }
 
 /**
- * 『（进阶）专用昆虫检测』只有昆虫类群有意义：非昆虫时置灰但仍然显示。
- * 之前这版把它弄丢了，用户以为功能没了 —— 所以宁可灰着也不隐藏。
+ * 『（进阶）专用×检测』现在每个具体类群都有自己的一套判据（昆虫/鸟类/植物/兽类/两栖爬行），
+ * 只有「通用(自动判断)」没有 → 灰掉但仍然显示，别让人以为功能没了。
+ * 旧版只认昆虫，选了植物这个勾选框直接灰死，用户只能吃通用判据。
  */
 function scStrictSync() {
-  for (const [chk, taxonSel, wrap] of [
-    ['scStrict', 'scTaxon', 'scStrictWrap'],
-    ['scStrictLocal', 'scLocalTaxon', 'scStrictLocalWrap'],
+  for (const [chk, taxonSel, wrap, txt] of [
+    ['scStrict', 'scTaxon', 'scStrictWrap', 'scStrictTxt'],
+    ['scStrictLocal', 'scLocalTaxon', 'scStrictLocalWrap', 'scStrictLocalTxt'],
   ]) {
-    const c = $(chk); const t = $(taxonSel); const w = $(wrap);
+    const c = $(chk); const t = $(taxonSel);
     if (!c || !t) continue;
-    const insect = /昆虫/.test(t.value || '');
-    c.disabled = !insect;
-    if (w) {
-      w.classList.toggle('off', !insect);
-      w.title = insect
-        ? '进阶：按昆虫鉴定标准严格评审（检查触角/复眼/足/翅/鞘翅等关键部位，并识别蜘蛛等非昆虫节肢动物）'
-        : '只有「类群」选昆虫时才能用（当前类群用的是通用判据）';
-    }
+    const short = scTaxonShort(t.value);
+    c.disabled = !short;
+    // 「勾着但被禁用」的旧状态不能在后台偷偷生效
+    if (!short) c.checked = false;
+    scStrictLabel(wrap, txt, short);
     // 抽屉里改了类群/勾选，页面上的快捷控件要立刻跟着变（两处不能各说各话）。
     // t.value 为空说明抽屉还没填好（初次绑定），这时别拿空值去改 cfg。
     if (SCR.cfg && t.value) {
@@ -9346,18 +9616,32 @@ function bindScore() {
     const card = e.target.closest('.card.sc-card');
     if (!card) return;
     const p = card.dataset.p;
-    if (SCR.sel.has(p)) SCR.sel.delete(p); else SCR.sel.add(p);
-    card.classList.toggle('sel', SCR.sel.has(p));
-    const tick = card.querySelector('.tick');
-    if (tick) tick.textContent = SCR.sel.has(p) ? '✓' : '';
-    scSyncSel();
+    if (!p) return;
+    // 角上的勾选圈：单纯开关这一张，不动别的
+    if (e.target.closest('.tick')) {
+      if (SCR.sel.has(p)) SCR.sel.delete(p); else SCR.sel.add(p);
+      scSelApply();
+      scDetailOpen(p);
+      return;
+    }
+    // 单击 = 只选这一张（和标注页一个口径）；要复选就按住 Shift / Ctrl / ⌘ 再点
+    const additive = e.shiftKey || e.ctrlKey || e.metaKey;
+    if (additive) {
+      if (SCR.sel.has(p)) SCR.sel.delete(p); else SCR.sel.add(p);
+      scSelApply();
+    } else {
+      SCR.sel = new Set([p]);
+      scSelApply();
+    }
     // 点一下同时把详情摊开：技术分各评分点 + AI 语义说明都在右边
     scDetailOpen(p);
   };
-  // 全选 / 清空：只作用于当前网格里显示着的照片
+  // 全选 / 清空：只作用于当前网格里显示着的照片；再点一次「取消全选」就恢复
   if ($('scSelAll')) {
     $('scSelAll').onclick = () => {
-      SCR.sel = new Set(scPagePaths());
+      const all = scPagePaths();
+      const allPicked = all.length > 0 && all.every((p) => SCR.sel.has(p));
+      SCR.sel = allPicked ? new Set() : new Set(all);
       scSelApply();
     };
   }
@@ -9461,6 +9745,17 @@ function bindScore() {
   if ($('scLlamaStart')) $('scLlamaStart').onclick = scLlamaStart;
   if ($('scLlamaStop')) $('scLlamaStop').onclick = scLlamaStop;
   if ($('scOpenModels')) $('scOpenModels').onclick = scOpenModels;
+  // 在线下载模型：一次委托，按钮是随清单重画的
+  if ($('scDlList')) {
+    $('scDlList').onclick = (e) => {
+      const start = e.target.closest('[data-dl-start]');
+      if (start) { scDlStart(start.dataset.dlStart); return; }
+      const cancel = e.target.closest('[data-dl-cancel]');
+      if (cancel) { scDlCancel(cancel.dataset.dlCancel); return; }
+      const del = e.target.closest('[data-dl-del]');
+      if (del) { scDlRemove(del.dataset.dlDel); }
+    };
+  }
   scSyncSel();
 }
 

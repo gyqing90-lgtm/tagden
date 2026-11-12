@@ -3604,6 +3604,23 @@ async function handleScore(req, res, pathname, q) {
     const b = await readJson(req);
     return sendJson(res, 200, LLAMA.openModelDir(b.dir));
   }
+  // ---- 模型在线下载：清单 / 开始 / 取消 / 删除 ----
+  // 只下到本机 models 目录，不下别的东西；进度靠前端轮询同一个清单接口
+  if (pathname === '/api/score/llama/catalog' && req.method === 'GET') {
+    return sendJson(res, 200, LLAMA.catalogState());
+  }
+  if (pathname === '/api/score/llama/download' && req.method === 'POST') {
+    const b = await readJson(req);
+    return sendJson(res, 200, LLAMA.startDownload(String(b.id || '')));
+  }
+  if (pathname === '/api/score/llama/download/cancel' && req.method === 'POST') {
+    const b = await readJson(req);
+    return sendJson(res, 200, LLAMA.cancelDownload(String(b.id || '')));
+  }
+  if (pathname === '/api/score/llama/remove' && req.method === 'POST') {
+    const b = await readJson(req);
+    return sendJson(res, 200, LLAMA.removeDownload(String(b.id || '')));
+  }
 
   // ---- AI 设置：明文 Key 只在服务端内存里，永远不回浏览器 ----
   if (pathname === '/api/score/ai' && req.method === 'GET') {
@@ -3645,12 +3662,19 @@ async function handleScore(req, res, pathname, q) {
       taxon: b.taxon,
       strict: b.strict,
     });
+    // 落盘时带上这次用的判据（哪个类群、是否严格模式）：详情面板要显示
+    // 「按植物判据」还是「专用昆虫检测」，不然用户没法确认选择到底生效没。
+    const aiRec = (one) => ({
+      ai: one.ai,
+      ai_taxon: r.taxon || '',
+      ...(r.strict ? { strict: true } : {}),
+      ...(r.strict && r.taxon === '昆虫' ? { insect_strict: true } : {}),
+    });
     if (b.dir && r.results) {
       const entries = {};
       for (const one of r.results) {
         if (!one.ai) continue;
-        // 记下这次评审用的判据，详情里要显示「专用昆虫检测」标记
-        entries[one.name] = r.strict ? { ai: one.ai, insect_strict: true } : { ai: one.ai };
+        entries[one.name] = aiRec(one);
       }
       if (Object.keys(entries).length) SCORE.put(dirOf(b.dir), entries);
     }
@@ -3659,7 +3683,7 @@ async function handleScore(req, res, pathname, q) {
       const patch = {};
       for (const one of r.results) {
         if (!one.ai || !one.name) continue;
-        patch[String(one.name)] = r.strict ? { ai: one.ai, insect_strict: true } : { ai: one.ai };
+        patch[String(one.name)] = aiRec(one);
       }
       if (Object.keys(patch).length) SCORE.remoteAi(patch);
     }

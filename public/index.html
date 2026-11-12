@@ -13,7 +13,7 @@
     <span class="logo">标</span>
     <div>
       <h1>物种标注工坊</h1>
-      <p>批量识别 · 人工确认 · 写回图片</p>
+      <p>本地识别 · 物种标注 · 照片评分 · 分类归档 · 自然在线</p>
     </div>
   </div>
 
@@ -106,7 +106,7 @@
             <button id="tagBatchBtn" class="ghost" hidden title="相册端批量鉴定：对勾选的照片统一赋一个名字，一次写回自然在线（只传鉴定结果，不传图片）">批量鉴定</button>
           </div>
         </details>
-        <button id="runBtn" class="primary" title="识别当前勾选或当前这一页">识别选中 <b id="selCount">0</b></button>
+        <button id="runBtn" class="primary" title="识别勾选的照片；在照片区按住鼠标拖出方框可批量框选">识别选中 <b id="selCount">0</b></button>
       </div>
     </div>
 
@@ -315,8 +315,8 @@
         <label class="chk-inline" title="照片里是什么类群，AI 就按那一类的鉴定要点评">
           评分对象 <select id="scAiTaxon"></select>
         </label>
-        <label class="check sc-quick-strict" id="scQuickStrictWrap" title="进阶：按昆虫鉴定标准严格评审（检查触角/复眼/足/翅/鞘翅等关键部位，并识别蜘蛛等非昆虫节肢动物）。只有类群选「昆虫」时可用。">
-          <input id="scQuickStrict" type="checkbox"> （进阶）专用昆虫检测
+        <label class="check sc-quick-strict" id="scQuickStrictWrap" title="进阶：按当前评分对象的鉴定标准严格评审（逐项检查该类群的鉴定关键部位）。「通用(自动判断)」没有专属判据，勾了也不生效。">
+          <input id="scQuickStrict" type="checkbox"> <span id="scQuickStrictTxt">（进阶）专用检测</span>
         </label>
         <label class="chk-inline" title="云端＝阿里云百炼（要自己的 API Key）；本地＝llama.cpp 在本机跑">
           引擎 <select id="scAiEngine">
@@ -401,8 +401,8 @@
           <div class="sc-cfg-row"><label>模型</label><select id="scCloudModel"></select></div>
           <div class="sc-cfg-row"><label>评分对象</label><select id="scTaxon"></select></div>
           <div class="sc-cfg-row sc-cfg-strictrow"><label>判据</label>
-            <label class="check sc-strict" id="scStrictWrap" title="进阶：按昆虫鉴定标准严格评审（检查触角/复眼/足/翅/鞘翅等关键部位，并识别蜘蛛等非昆虫节肢动物）。只有类群选「昆虫」时可用。">
-              <input id="scStrict" type="checkbox"> （进阶）专用昆虫检测
+            <label class="check sc-strict" id="scStrictWrap" title="进阶：按当前评分对象的鉴定标准严格评审（逐项检查该类群的鉴定关键部位）。「通用(自动判断)」没有专属判据，勾了也不生效。">
+              <input id="scStrict" type="checkbox"> <span id="scStrictTxt">（进阶）专用检测</span>
             </label>
           </div>
           <div class="sc-cfg-row"><label>图片边长</label><select id="scSide">
@@ -466,6 +466,14 @@
           </div>
           <div class="sc-loc-list" id="scModelList"></div>
 
+          <!-- 在线下载：选一个点「下载」，直接下到上面的模型目录，不用再去网页里找文件 -->
+          <div class="sc-loc-head">
+            <span>没下过模型？点这里下 <b>下完自动放进模型目录</b></span>
+            <span class="sc-gap"></span>
+            <span class="sc-hint" id="scDlDir"></span>
+          </div>
+          <div class="sc-dl-list" id="scDlList"></div>
+
           <div class="sc-cfg-row"><label>视觉投影</label>
             <select id="scMmprojSel" title="VLM 需要配套的 mmproj（名字里通常带 mmproj / vision）"><option value="">（选一个 mmproj）</option></select>
           </div>
@@ -484,8 +492,8 @@
             <input id="scLocalModel" type="text" spellcheck="false" placeholder="启动后自动填 tagden-ai"></div>
           <div class="sc-cfg-row"><label>评分对象</label><select id="scLocalTaxon"></select></div>
           <div class="sc-cfg-row sc-cfg-strictrow"><label>判据</label>
-            <label class="check sc-strict" id="scStrictLocalWrap" title="进阶：按昆虫鉴定标准严格评审（检查触角/复眼/足/翅/鞘翅等关键部位，并识别蜘蛛等非昆虫节肢动物）。只有类群选「昆虫」时可用。">
-              <input id="scStrictLocal" type="checkbox"> （进阶）专用昆虫检测
+            <label class="check sc-strict" id="scStrictLocalWrap" title="进阶：按当前评分对象的鉴定标准严格评审（逐项检查该类群的鉴定关键部位）。「通用(自动判断)」没有专属判据，勾了也不生效。">
+              <input id="scStrictLocal" type="checkbox"> <span id="scStrictLocalTxt">（进阶）专用检测</span>
             </label>
           </div>
           <div class="sc-cfg-row"><label>图片边长</label><select id="scLocalSide">

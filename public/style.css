@@ -1974,8 +1974,9 @@ body.resizing {
   pointer-events: none;
 }
 .sc-grid.dragging { user-select: none; }
-/* 自然在线页也支持框选：拖动时给个十字光标示意（natGrid 只挂 .grid 类，不挂 .sc-grid） */
-.grid.dragging { cursor: crosshair; }
+/* 自然在线页也支持框选：拖动时给个十字光标示意（natGrid 只挂 .grid 类，不挂 .sc-grid）
+   顺带把文字选中关掉 —— 框选时会顺手把卡片里的文件名一起拖蓝 */
+.grid.dragging { cursor: crosshair; user-select: none; }
 
 /* 评分详情：跟着被点的照片走的小浮层（不再是钉在右上的长抽屉） */
 .sc-detail {
@@ -2191,6 +2192,41 @@ body.resizing {
   font-size: 12px;
   line-height: 1.8;
 }
+/* 在线下载模型：一行一个，右边状态 + 按钮，下载中在底部铺一条进度 */
+.sc-dl-list { max-height: 260px; overflow: auto; }
+.sc-dl-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin-bottom: 6px;
+  font-size: 12px;
+  background: var(--card);
+}
+.sc-dl-item.on { border-color: var(--green); background: var(--green-l); }
+.sc-dl-item .nm { flex: 1 1 auto; min-width: 0; }
+.sc-dl-item .nm b { font-weight: 600; }
+.sc-dl-item .sub { display: block; color: var(--ink-3); font-size: 11px; margin-top: 2px; line-height: 1.5; }
+.sc-dl-right { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+.sc-dl-st { color: var(--ink-3); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.sc-dl-st.ok { color: var(--green-d); }
+.sc-dl-st.bad { color: #c25b52; }
+.sc-dl-bar {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 5px;
+  height: 3px;
+  border-radius: 3px;
+  background: var(--line);
+  overflow: hidden;
+}
+.sc-dl-bar i { display: block; height: 100%; background: var(--green); border-radius: 3px; transition: width .3s; }
+.sc-dl-files { position: absolute; left: 10px; bottom: 3px; color: var(--ink-3); font-size: 10px; opacity: .75; }
+
 .sc-cfg-row {
   display: flex;
   align-items: center;
@@ -3542,9 +3578,24 @@ html[data-theme="dark"] .toast { background: #26352c; color: #f2f7f3; }
   line-height: 1;
 }
 .rail-expand:hover { color: var(--green-d); background: var(--green-l); }
-.layout.rail-collapsed { grid-template-columns: 0 0 minmax(0, 1fr) !important; }
-.layout.rail-collapsed .rail,
-.layout.rail-collapsed .gutter { display: none; }
+/* 收起左栏：只把左边那一列压成 0，别动 main / panel 的轨道。
+   这里的轨道数必须和 .layout 默认那 4 列一一对应（rail | gutter | main | panel）：
+   之前只写了 3 列，第 4 个子元素（右栏 panel）被挤到第 3 列 = main 的 1fr 上，
+   main 落到第 2 列（0 宽）→ 一收左栏整页就只剩空白。 */
+.layout.rail-collapsed { grid-template-columns: 0 0 minmax(0, 1fr) 356px !important; }
+/* 统计页没有右栏（.panel 被 display:none），轨道要少一条，否则右边空出 356px */
+.layout.stats-mode.rail-collapsed { grid-template-columns: 0 0 minmax(0, 1fr) !important; }
+/* 轨道 0 宽但元素仍在流里：rail 必须裁掉溢出，否则会盖到照片区上 */
+.layout.rail-collapsed .rail {
+  min-width: 0;
+  width: 0;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  visibility: hidden;
+  pointer-events: none;
+}
+.layout.rail-collapsed .gutter { visibility: hidden; pointer-events: none; }
 .layout.rail-collapsed .rail-expand { display: grid; place-items: center; }
 .layout.rail-collapsed #railToggle { display: none !important; }
 
@@ -3568,7 +3619,13 @@ html[data-theme="dark"] .toast { background: #26352c; color: #f2f7f3; }
 
 @media (max-width: 1180px) {
   .layout.rail-collapsed { grid-template-columns: minmax(0, 1fr) !important; }
-  .layout.rail-collapsed .rail { display: flex; }
+  /* 窄屏左栏是 fixed 抽屉，不受「收起」那套 0 宽规则影响 */
+  .layout.rail-collapsed .rail {
+    display: flex;
+    width: min(310px, 88vw);
+    visibility: visible;
+    pointer-events: auto;
+  }
   .layout.rail-collapsed .rail-expand,
   .layout.rail-collapsed .rail-collapse,
   .rail-collapse,
