@@ -1084,6 +1084,98 @@ button.ghost.mini {
   font-size: 12px;
   color: var(--ink-3);
 }
+/* 本地名录状态：接上了就用绿色，没接上保持灰色（别用红，不影响归档本身） */
+#archLocalStat { cursor: default; }
+#archLocalStat.arch-local-ok { color: var(--green); }
+/* 名录提醒条：归档页顶上那条「先接入本地名录」，接入后自动消失 */
+.taxo-dl-tip {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 9px 16px;
+  background: var(--amber-l);
+  border-bottom: 1px solid rgba(181, 118, 42, .28);
+}
+.taxo-dl-tip[hidden] { display: none; }
+.taxo-dl-ico {
+  flex: 0 0 26px;
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: rgba(181, 118, 42, .18);
+  color: var(--amber);
+  font-size: 15px;
+  font-weight: 700;
+}
+.taxo-dl-txt {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  font-size: 12.5px;
+  color: var(--ink-2);
+}
+.taxo-dl-txt b { font-size: 13px; color: var(--ink); }
+.taxo-dl-txt .warn { color: var(--amber); font-weight: 600; }
+.taxo-dl-act { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; }
+.taxo-dl-act .primary.mini { background: var(--amber); border-color: var(--amber); color: #fff; }
+html[data-theme="dark"] .taxo-dl-act .primary.mini { color: #1b1207; }
+.taxo-dl-act button[hidden] { display: none; }
+
+/* 「本地物种名录」弹层 */
+.sheet.taxo { width: min(660px, 94vw); }
+.taxo-steps {
+  margin: 10px 0 12px;
+  padding-left: 20px;
+  font-size: 12.5px;
+  line-height: 1.8;
+  color: var(--ink-2);
+}
+.taxo-steps b { color: var(--ink); }
+.taxo-prog { margin: 4px 0 12px; }
+/* .bar/.fill 原来的样式都挂在 .sheet.arch 下，这个弹层得自己带一份 */
+.taxo-prog .bar {
+  height: 10px;
+  border-radius: 6px;
+  background: var(--line);
+  overflow: hidden;
+}
+.taxo-prog .fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 6px;
+  background: linear-gradient(90deg, var(--green), #2ea36a);
+  transition: width 0.3s ease;
+}
+.taxo-prog .ptext { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--ink-2); }
+.taxo-prog .ptext .warn { color: var(--amber); font-weight: 600; }
+.taxo-manual { display: flex; align-items: center; gap: 8px; }
+.taxo-manual input {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card);
+  font-size: 12.5px;
+}
+.taxo-found { margin-top: 10px; font-size: 12.5px; }
+.taxo-found .it {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.taxo-found .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.taxo-found .sz { flex: 0 0 auto; color: var(--ink-3); font-size: 12px; }
+
 .arch-scope {
   display: flex;
   align-items: center;

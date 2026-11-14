@@ -39,6 +39,10 @@ const secure = require('./lib/secure');
 const SEED_CIPHER = require('./lib/seed');
 const LC = require('./lib/labelcache');
 const TAXO = require('./lib/taxonomy');
+// 本地物种名录（Chinese-Latin 的 backbone）：归档/统计解析分类时优先用它，不联网
+const LOCAL_TAXO = require('./lib/local-taxo');
+// 名录下载：本机没有名录时，引导用户从百度网盘取，下载完自动解压 + 接入
+const TAXO_FETCH = require('./lib/taxo-fetch');
 const STATS = require('./lib/stats');
 const LIB = require('./lib/library');
 const REGIONS = require('./lib/regions');
@@ -97,6 +101,19 @@ const LOG_FILE = path.join(LOG_DIR, 'app.log');
 LC.init(path.join(CACHE, 'labels'));
 // 分类阶元（学名 → 界门纲目科属）缓存，查过就不再联网
 TAXO.init(path.join(CACHE, 'taxonomy'));
+// 本地名录：界面里选过的目录记在 data/local-taxo.json；没选就自动找 OneDrive/Chinese-Latin。
+// 真正打开数据库是懒加载的（OneDrive 上可能还是「仅云端」文件，启动时不去碰它）。
+LOCAL_TAXO.init({ dir: readLocalTaxoDir() });
+// 名录下载器：点「从百度网盘下载」后盯着下载目录，文件到位就自动解压 + 注册
+// （注意这里不主动开数据库，避免 OneDrive 上「仅云端」的 2.6 GB 一启动就被拉下来）
+TAXO_FETCH.init({
+  onInstalled: (dir) => {
+    saveLocalTaxoDir(dir);
+    LOCAL_TAXO.init({ dir });
+    const st = LOCAL_TAXO.status();
+    logLine('info', `local-taxo 接入 ${dir} → ${st.ok ? 'OK' : '失败：' + st.error}`);
+  },
+});
 // 自然在线：令牌跟 config.json 一起放 data/，图片缓存跟缩略图一起放本机缓存目录
 NAT.init({ dataDir: DATA, cacheDir: CACHE });
 // 照片评分：缓存放 CACHE/score/，AI 的 Key 加密放 data/score-ai.json
@@ -110,7 +127,9 @@ try {
 } catch {}
 
 const IMAGE_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp', '.heic', '.tif', '.tiff', '.bmp', '.gif']);
-const MAX_STAT_FILES = 5000; // 统计扫描上限，防止超大目录把主程序卡死
+// 统计进度：前端在请求返回前轮询它，把「已扫 1234 张」显示出来。
+// 只记一个当前任务 —— 统计是一次一个，不需要队列。
+const STAT_PROGRESS = { active: false, dir: '', phase: '', done: 0, total: 0, startedAt: 0 };
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'application/javascript; charset=utf-8',
@@ -186,6 +205,30 @@ function loadConfig() {
 }
 
 const config = loadConfig();
+
+/* 本地名录的目录（Chinese-Latin）：单独存一个小文件，不动 config.json ——
+   路径跟账号/Key 无关，配置迁移时也不该带走对方机器上的路径。 */
+function readLocalTaxoDir() {
+  try {
+    const j = JSON.parse(fs.readFileSync(path.join(DATA, 'local-taxo.json'), 'utf8'));
+    return String((j && j.dir) || '');
+  } catch {
+    return '';
+  }
+}
+
+function saveLocalTaxoDir(dir) {
+  try {
+    fs.writeFileSync(path.join(DATA, 'local-taxo.json'), JSON.stringify({ dir: String(dir || '') }), {
+      encoding: 'utf8',
+      mode: 0o600,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // 用户在「自然在线」里退出过登录的话，种子里烧的那枚旧令牌不许再顶上：
 // 不然退出后识别模块（xingse 站点）还接着用这个账号，重启后还会被种子悄悄登回去。
 if (NAT.loggedOut()) {
@@ -3206,7 +3249,6 @@ async function mapLimit(list, limit, fn) {
 // 统计页不再联网反查 GPS，不会把坐标发给第三方；离最近城市超过 80 km 时
 // 返回空，回落到文件夹名，避免把边远地区标到相邻省份。
 async function walkStats(dir, root, out) {
-  if (out.length >= MAX_STAT_FILES) return;
   let ents;
   try {
     ents = await fsp.readdir(dir, { withFileTypes: true });
@@ -3214,7 +3256,6 @@ async function walkStats(dir, root, out) {
     return;
   }
   for (const e of ents) {
-    if (out.length >= MAX_STAT_FILES) return;
     if (e.name.startsWith('.')) continue; // 点开头的隐藏文件/目录（.git/.cache…）
     const full = path.join(dir, e.name);
     try {
@@ -3225,6 +3266,8 @@ async function walkStats(dir, root, out) {
         const top = rel.includes('/') ? rel.slice(0, rel.indexOf('/')) : '';
         const folder = rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : '根目录';
         out.push({ full, name: e.name, stem: path.basename(e.name, path.extname(e.name)), top, folder });
+        STAT_PROGRESS.phase = 'walk';
+        STAT_PROGRESS.done = out.length;
       }
     } catch {
       /* 坏项跳过 */
@@ -3234,12 +3277,23 @@ async function walkStats(dir, root, out) {
 
 async function analyzeStats(dir) {
   const root = path.resolve(dir);
+  STAT_PROGRESS.active = true;
+  STAT_PROGRESS.dir = root;
+  STAT_PROGRESS.phase = 'walk';
+  STAT_PROGRESS.done = 0;
+  STAT_PROGRESS.total = 0;
+  STAT_PROGRESS.startedAt = Date.now();
   const files = [];
   await walkStats(root, root, files);
+  // 张数不设上限：让用户看到的就是这个文件夹真实有多少张
+  STAT_PROGRESS.phase = 'read';
+  STAT_PROGRESS.done = 0;
+  STAT_PROGRESS.total = files.length;
 
   // 1) 并发读标签 + EXIF：同一次读头把 XMP 和拍摄时间/GPS 一起拿回来。
   //    以前是串行 await，5000 张能拖到几十分钟；这里 8 路并发，且不再为 EXIF 二次开文件。
   const STAT_CONC = 8;
+  let readDone = 0;
   const items = await mapLimit(files, STAT_CONC, async (f) => {
     let label = null;
     try {
@@ -3253,7 +3307,7 @@ async function analyzeStats(dir) {
       cn = nf.cn;
       latin = nf.latin;
     }
-    // 统计只用到时间/坐标；缩略图丢掉，5000 张能省几十 MB
+    // 统计只用到时间/坐标；缩略图丢掉，上万张能省几十 MB
     const ex = label && label.meta ? { ...label.meta, thumb: null } : { ...EX.EMPTY };
     let taken = null;
     if (ex.dateTime) {
@@ -3268,11 +3322,17 @@ async function analyzeStats(dir) {
         taken = null;
       }
     }
+    readDone += 1;
+    STAT_PROGRESS.done = readDone;
     return { f, cn, latin, ex, taken };
   });
 
-  // 2) 批量解析分类（复用标注工坊真实的分类缓存 + iNat/GBIF）
+  // 2) 批量解析分类（本地名录优先；本地没有才联网，见 lib/taxonomy.js）
+  STAT_PROGRESS.phase = 'taxonomy';
+  STAT_PROGRESS.done = 0;
+  STAT_PROGRESS.total = new Set(items.map((it) => (it.latin || `cn:${it.cn}`).toLowerCase())).size;
   const taxoMap = await TAXO.resolve(items.map((it) => ({ latin: it.latin, cn: it.cn })));
+  STAT_PROGRESS.done = STAT_PROGRESS.total;
 
   // 3) 组装 records。GPS 用本地索引查省/市，不再联网；
   //    TAGDEN_NO_GEOCODE=1 时连本地标签也不用，只保留文件夹名。
@@ -3320,7 +3380,7 @@ async function analyzeStats(dir) {
     ok: true,
     path: root,
     total: records.length,
-    truncated: files.length >= MAX_STAT_FILES,
+    truncated: false,
     level,
     dimensions: STATS.DIMENSIONS.map(([dim, label]) => ({ dim, label, data: dims[dim] })),
     tree,
@@ -3469,6 +3529,8 @@ async function apiStats(q) {
     return await analyzeStats(dir);
   } catch (err) {
     return { ok: false, error: String(err && err.message ? err.message : err) };
+  } finally {
+    STAT_PROGRESS.active = false;
   }
 }
 
@@ -3746,7 +3808,52 @@ async function handleApi(req, res, pathname, q) {
   if (pathname.startsWith('/api/score/')) return handleScore(req, res, pathname, q);
 
   // 统计分析：递归扫当前文件夹及其子文件夹下所有已标注/未标注物种图
+  // 进度：统计请求可能要跑几分钟（上万张），前端边等边轮询这个接口显示进度
+  if (pathname === '/api/stats/progress') {
+    return sendJson(res, 200, {
+      ok: true,
+      ...STAT_PROGRESS,
+      elapsed: STAT_PROGRESS.startedAt ? Date.now() - STAT_PROGRESS.startedAt : 0,
+    });
+  }
   if (pathname === '/api/stats') return sendJson(res, 200, await apiStats(q));
+
+  // 本地物种名录：状态（有没有接上 Chinese-Latin）+ 指定目录
+  if (pathname === '/api/local-taxo/status' && req.method === 'GET') {
+    return sendJson(res, 200, LOCAL_TAXO.status());
+  }
+  if (pathname === '/api/local-taxo/dir' && req.method === 'POST') {
+    const b = await readJson(req);
+    const dir = String(b.dir || '').trim();
+    saveLocalTaxoDir(dir);
+    LOCAL_TAXO.init({ dir });
+    return sendJson(res, 200, LOCAL_TAXO.status());
+  }
+  // 名录下载：本机没有名录时的「从百度网盘取」链路
+  //   setup   —— 分享链接、落地目录、当前进度、下载目录里已有的候选
+  //   fetch   —— 开始盯着下载目录（前端同时打开分享页）
+  //   cancel  —— 不等了
+  //   install —— 手动导入一个路径（文件夹 / .sqlite / zip）
+  if (pathname === '/api/local-taxo/setup' && req.method === 'GET') {
+    return sendJson(res, 200, TAXO_FETCH.info());
+  }
+  if (pathname === '/api/local-taxo/fetch' && req.method === 'POST') {
+    return sendJson(res, 200, TAXO_FETCH.start());
+  }
+  if (pathname === '/api/local-taxo/fetch/cancel' && req.method === 'POST') {
+    return sendJson(res, 200, TAXO_FETCH.stop());
+  }
+  if (pathname === '/api/local-taxo/install' && req.method === 'POST') {
+    const b = await readJson(req);
+    const r = await TAXO_FETCH.install(String(b.path || ''));
+    // 成功/失败都放 result 里：HTTP 层保持 ok:true，前端才能拿到 status 一起刷新
+    return sendJson(res, 200, {
+      ok: true,
+      result: r,
+      status: LOCAL_TAXO.status(),
+      setup: TAXO_FETCH.info(),
+    });
+  }
 
   // 图库：全库索引 / 搜索 / 重复文件
   if (pathname.startsWith('/api/library/')) return handleLibrary(req, res, pathname, q);

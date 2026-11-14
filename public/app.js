@@ -2765,7 +2765,7 @@ async function loadExif(p) {
  * 归档只剩「预览 + 确认」这一步：范围在「按分类归档」页面上勾选，
  * 这里只负责把将要发生的事说清楚，用户点头才真的动文件。
  */
-const ARCH = { payload: null };
+const ARCH = { payload: null, local: null };
 /** 预览文案：分类文件夹太长会挤爆弹层，中间省略成 界/…/科/属 */
 function archShort(p) {
   const seg = String(p).split('/');
@@ -2995,6 +2995,284 @@ function archTile(kind, opt) {
       </div>`;
 }
 
+/**
+ * 本地物种名录（Chinese-Latin）：归档时优先用它解析界门纲目科属。
+ * 状态只查一次；用户换目录时 force=true 重查。
+ * 没接入时顺手把顶上的「去百度网盘下载」提醒画出来。
+ */
+async function archLocalLoad(force) {
+  if (ARCH.local && !force) {
+    archLocalPaint();
+    if (!ARCH.local.ok) taxoSetupLoad();
+    return;
+  }
+  try {
+    ARCH.local = await api('/api/local-taxo/status');
+  } catch (err) {
+    ARCH.local = { ok: false, error: err.message };
+  }
+  archLocalPaint();
+  if (!ARCH.local.ok) await taxoSetupLoad();
+}
+
+function archLocalPaint() {
+  const el = $('archLocalStat');
+  if (!el) return;
+  const s = ARCH.local || {};
+  if (s.ok) {
+    const base = String(s.dbFile || '').split(/[\\/]/).pop() || 'backbone';
+    const gb = s.size ? ` · ${(s.size / 1073741824).toFixed(1)} GB` : '';
+    el.textContent = `本地名录：已接入（${base}${gb}）`;
+    el.title = `本地名录优先：${s.dbFile}\n归档/统计解析分类先查它，查不到才联网`;
+    el.classList.add('arch-local-ok');
+  } else {
+    el.textContent = `本地名录：${s.error || '未接入'}`;
+    el.title = `${s.error || '没找到 Chinese-Latin'}\n点「本地名录」选 Chinese-Latin 文件夹，归档就不用联网了`;
+    el.classList.remove('arch-local-ok');
+  }
+  taxoPaint();
+}
+
+/* ---------------- 名录下载：提醒条 + 弹层 ---------------- */
+
+const TAXO = { setup: null, timer: null, hideTip: false, busy: false, pending: null };
+
+/** 秒数说人话：12 秒 / 3 分 20 秒 */
+function taxoDur(sec) {
+  const s = Math.max(0, Math.round(sec || 0));
+  return s < 60 ? `${s} 秒` : `${Math.floor(s / 60)} 分${s % 60 ? ` ${s % 60} 秒` : ''}`;
+}
+
+/** 拉一次下载链路状态（分享链接、落地目录、进度、下载目录里已有的候选） */
+async function taxoSetupLoad() {
+  try {
+    TAXO.setup = await api('/api/local-taxo/setup');
+  } catch {
+    return; // 老版本后端没有这个接口：不显示提醒，也不报错
+  }
+  taxoPaint();
+  const ph = (TAXO.setup.state || {}).phase;
+  if (ph === 'waiting' || ph === 'extract') taxoPollStart();
+  if ($('taxoMask') && $('taxoMask').classList.contains('show')) taxoPaintDlg();
+}
+
+/** 归档页顶部那条提醒：没接入名录才显示；正在下载/解压时改成进度文案 */
+function taxoPaint() {
+  const tip = $('taxoDlTip');
+  if (!tip) return;
+  const s = ARCH.local || {};
+  // 状态还没拉回来时先别闪一下提醒条；确定没接入再显示
+  tip.hidden = !ARCH.local || !!s.ok || TAXO.hideTip;
+  if (tip.hidden) return;
+
+  const st = (TAXO.setup && TAXO.setup.state) || {};
+  const waiting = st.phase === 'waiting' || st.phase === 'extract';
+  const btn = $('taxoDlGet');
+  const imp = $('taxoDlImport');
+  if (btn) btn.textContent = waiting ? '取消等待' : '从百度网盘下载';
+  if (imp) imp.hidden = waiting;
+
+  const txt = $('taxoDlTipTxt');
+  if (!txt) return;
+  if (st.phase === 'waiting') {
+    txt.innerHTML = `<span class="warn">正在等下载完成（已等 ${taxoDur((st.elapsed || 0) / 1000)}）</span>`
+      + '　下好会自动解压并接入，不用回来点按钮。';
+  } else if (st.phase === 'extract') {
+    const got = st.got ? `${(st.got / 1073741824).toFixed(2)} GB` : '0';
+    txt.innerHTML = `<span class="warn">正在解压（已写出 ${got}）</span>　2.6 GB 大约 1–3 分钟，别关页面。`;
+  } else if (st.phase === 'error') {
+    txt.innerHTML = `<span class="warn">${esc(st.error || '没取到名录')}</span>　也可以点「已有文件，导入…」手动选。`;
+  } else {
+    txt.innerHTML = '没有名录时，每张图都要联网查分类，几千张会很慢，断网就全掉进「未分类」。';
+  }
+}
+
+function taxoOpenBaidu() {
+  const url = ((TAXO.setup && TAXO.setup.baidu && TAXO.setup.baidu.href)
+    || 'https://pan.baidu.com/s/1USs8WsrECEt64Nk8VxW9KQ?pwd=591g');
+  // 用 <a target=_blank> 而不是 window.open(..., 'noopener')：后者返回值恒为 null，
+  // 会被误判成「被拦截」而把当前页跳走，程序界面就没了。
+  const a = document.createElement('a');
+  a.href = url;
+  a.target = '_blank';
+  a.rel = 'noopener noreferrer';
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => a.remove(), 0);
+}
+
+/** 提醒条上那个按钮：开始等下载 / 取消等待 */
+async function taxoGetClick() {
+  const st = (TAXO.setup && TAXO.setup.state) || {};
+  if (st.phase === 'waiting' || st.phase === 'extract') {
+    try { TAXO.setup = await post('/api/local-taxo/fetch/cancel', {}); } catch {}
+    taxoPollStop();
+    taxoPaint();
+    taxoPaintDlg();
+    toast('已取消等待');
+    return;
+  }
+  TAXO.hideTip = false;
+  try {
+    TAXO.setup = await post('/api/local-taxo/fetch', {});
+  } catch (e) {
+    toast(e.message || '启动失败', 3600);
+    return;
+  }
+  taxoPaint();
+  taxoPaintDlg();
+  taxoPollStart();
+  taxoOpenBaidu();
+  toast('已开始等待：下完后会自动解压并入，不用回来点', 4600);
+}
+
+function taxoPollStart() {
+  if (TAXO.timer) return;
+  TAXO.timer = setInterval(taxoPollOnce, 2000);
+}
+
+function taxoPollStop() {
+  if (TAXO.timer) clearInterval(TAXO.timer);
+  TAXO.timer = null;
+}
+
+async function taxoPollOnce() {
+  try {
+    TAXO.setup = await api('/api/local-taxo/setup');
+  } catch {
+    return;
+  }
+  const st = (TAXO.setup.state || {});
+  const dlgOpen = $('taxoMask') && $('taxoMask').classList.contains('show');
+  if (st.phase === 'done') {
+    taxoPollStop();
+    try { ARCH.local = await api('/api/local-taxo/status'); } catch {}
+    archLocalPaint();
+    taxoPaint();
+    if (dlgOpen) taxoPaintDlg();
+    if (ARCH.local && ARCH.local.ok) {
+      toast('本地名录已接入，归档不用联网了', 5200);
+      if (dlgOpen) $('taxoMask').classList.remove('show');
+      if (TAXO.pending) { const body = TAXO.pending; TAXO.pending = null; archPreviewFlow(body); }
+      return;
+    }
+    // 找到了文件但打不开（不是这份名录 / 文件损坏）：说清楚，别让界面停在那儿
+    toast('名录文件找到了，但打不开：' + ((ARCH.local && ARCH.local.error) || '格式不对'), 6000);
+  }
+  if (st.phase === 'idle' || st.phase === 'error') taxoPollStop();
+  taxoPaint();
+  if (dlgOpen) taxoPaintDlg();
+}
+
+/** 弹层：步骤说明 + 进度 + 手动导入 */
+async function taxoDlgOpen(keepFound) {
+  $('taxoMask').classList.add('show');
+  if (!TAXO.setup) await taxoSetupLoad();
+  else taxoPaintDlg();
+  if (!keepFound) taxoRenderFound();
+}
+
+function taxoPaintDlg() {
+  const st = (TAXO.setup && TAXO.setup.state) || {};
+  const prog = $('taxoProg');
+  const phase = $('taxoPhase');
+  const bar = $('taxoBar');
+  const openBtn = $('taxoOpen');
+  const skip = $('taxoSkip');
+  if (skip) skip.hidden = !TAXO.pending;
+  if (!phase) return;
+
+  const waiting = st.phase === 'waiting' || st.phase === 'extract';
+  if (openBtn) openBtn.textContent = waiting ? '取消等待' : '打开百度网盘';
+  prog.hidden = st.phase === 'idle' || st.phase === 'done';
+  if (st.phase === 'waiting') {
+    bar.style.width = '8%';
+    phase.innerHTML = `<span class="spin"></span> 正在等下载完成…已等 ${taxoDur((st.elapsed || 0) / 1000)}　`
+      + '下载目录里一出现就自动接入。';
+  } else if (st.phase === 'extract') {
+    const pct = Math.min(97, Math.round(((st.got || 0) / (2.6 * 1073741824)) * 100)) || 4;
+    bar.style.width = pct + '%';
+    phase.innerHTML = `<span class="spin"></span> 正在解压 ${(st.got / 1073741824).toFixed(2)} GB / 约 2.6 GB（${pct}%）`;
+  } else if (st.phase === 'error') {
+    bar.style.width = '100%';
+    phase.innerHTML = `<span class="warn">${esc(st.error || '没取到名录')}</span>`;
+  }
+}
+
+/** 把下载目录里「已经存在」的名录列出来，一点就导入（不必重新下一次 2.6 GB） */
+function taxoRenderFound() {
+  const box = $('taxoFound');
+  if (!box) return;
+  const list = (TAXO.setup && TAXO.setup.found) || [];
+  const st = (TAXO.setup && TAXO.setup.state) || {};
+  const show = list.filter((it) => it.path !== st.file);
+  if (!show.length) {
+    box.hidden = true;
+    box.innerHTML = '';
+    return;
+  }
+  box.hidden = false;
+  box.innerHTML = '<div class="muted">下载文件夹里已经有的，可直接导入：</div>'
+    + show.map((it) => `<div class="it">
+        <span class="nm" title="${esc(it.path)}">${esc(it.name)}</span>
+        <span class="sz">${it.size ? (it.size / 1073741824).toFixed(2) + ' GB' : ''}</span>
+        <button class="ghost mini" data-p="${esc(it.path)}">导入</button>
+      </div>`).join('');
+  box.onclick = (e) => {
+    const b = e.target.closest('button[data-p]');
+    if (!b) return;
+    if ($('taxoPath')) $('taxoPath').value = b.dataset.p;
+    taxoDoImport(b.dataset.p);
+  };
+}
+
+async function taxoDoImport(src) {
+  const p = String(src || ($('taxoPath') && $('taxoPath').value) || '').trim();
+  if (!p) {
+    toast('先选一个文件夹，或者把 zip 的路径贴进来');
+    return;
+  }
+  if (TAXO.busy) return;
+  TAXO.busy = true;
+  const btn = $('taxoDoImport');
+  if (btn) btn.disabled = true;
+  $('taxoProg').hidden = false;
+  $('taxoBar').style.width = '8%';
+  $('taxoPhase').innerHTML = '<span class="spin"></span> 正在导入…（压缩包要先解压，2.6 GB 可能要几分钟）';
+  try {
+    const r = await post('/api/local-taxo/install', { path: p });
+    TAXO.setup = r.setup || TAXO.setup;
+    const res = r.result || r;
+    if (res.ok) {
+      ARCH.local = r.status || (await api('/api/local-taxo/status'));
+      archLocalPaint();
+      taxoPaint();
+      $('taxoMask').classList.remove('show');
+      toast('本地名录已接入，归档不用联网了', 5200);
+      if (TAXO.pending) {
+        const body = TAXO.pending;
+        TAXO.pending = null;
+        archPreviewFlow(body);
+      }
+      return;
+    }
+    $('taxoPhase').innerHTML = `<span class="warn">${esc(res.error || '导入失败')}</span>`;
+  } catch (e) {
+    $('taxoPhase').innerHTML = `<span class="warn">${esc(e.message || '导入失败')}</span>`;
+  } finally {
+    TAXO.busy = false;
+    if (btn) btn.disabled = false;
+  }
+}
+
+/** 打开弹层；pending 不为空时，底下多一个「先不管，继续归档」 */
+function taxoGuardRun(body) {
+  TAXO.pending = body;
+  taxoDlgOpen();
+  taxoPaintDlg();
+}
+
 function renderArchiveTab() {
   const grid = $('archGrid');
   const tiles = [];
@@ -3040,6 +3318,7 @@ function renderArchiveTab() {
     if (card) loadDir(card.dataset.d);
   };
   updateArchSelInfo();
+  archLocalLoad();
 }
 
 function updateArchSelInfo() {
@@ -3082,6 +3361,11 @@ async function archRunClick() {
     if (sel.length) body.folders = sel;
   }
   if (dest) body.dest = dest;
+  // 没接本地名录先提醒一次：不装的话每张图都要联网查分类，几千张能等到怀疑人生
+  if (ARCH.local && ARCH.local.ok === false && !TAXO.hideTip) {
+    taxoGuardRun(body);
+    return;
+  }
   await archPreviewFlow(body);
 }
 
@@ -3160,6 +3444,81 @@ function bindArchiveTab() {
       toast('没有指定目标文件夹时只能就地归档，也就是移动', 3400);
     }
   };
+
+  $('archLocalBtn').onclick = () => {
+    const cur = ARCH.local && ARCH.local.dbFile ? ARCH.local.dbFile.replace(/[\\/][^\\/]+$/, '') : '';
+    dirPickerOpen(cur || S.dir, async (p) => {
+      try {
+        ARCH.local = await post('/api/local-taxo/dir', { dir: p });
+        archLocalPaint();
+        toast(
+          ARCH.local.ok
+            ? '已接入本地名录：归档时会先用它解析分类，不用联网'
+            : '这个文件夹里没找到 backbone 数据库：' + (ARCH.local.error || ''),
+          4600,
+        );
+      } catch (err) {
+        toast('设置本地名录失败：' + err.message, 3800);
+      }
+    });
+  };
+
+  // 名录下载：提醒条 / 弹层 / 手动导入
+  if ($('taxoDlGet')) $('taxoDlGet').onclick = taxoGetClick;
+  if ($('taxoDlHide')) {
+    $('taxoDlHide').onclick = () => {
+      TAXO.hideTip = true;
+      taxoPaint();
+      toast('这次先不提示；重新进入「分类归档」还会提醒', 3200);
+    };
+  }
+  if ($('taxoDlImport')) $('taxoDlImport').onclick = () => taxoDlgOpen();
+  if ($('taxoOpen')) {
+    $('taxoOpen').onclick = async () => {
+      const st = (TAXO.setup && TAXO.setup.state) || {};
+      if (st.phase === 'waiting' || st.phase === 'extract') {
+        await taxoGetClick(); // 同一个开关：等的时候点它就是取消
+        return;
+      }
+      if (!TAXO.setup) await taxoSetupLoad();
+      if (!TAXO.setup) {
+        taxoOpenBaidu();
+        return;
+      }
+      try {
+        TAXO.setup = await post('/api/local-taxo/fetch', {});
+      } catch (e) {
+        toast(e.message || '启动失败', 3600);
+      }
+      taxoPaint();
+      taxoPaintDlg();
+      taxoPollStart();
+      taxoOpenBaidu();
+      toast('已开始等待：下完后会自动解压并入', 4600);
+    };
+  }
+  if ($('taxoClose')) {
+    $('taxoClose').onclick = () => {
+      $('taxoMask').classList.remove('show');
+      TAXO.pending = null;
+    };
+  }
+  if ($('taxoSkip')) {
+    $('taxoSkip').onclick = () => {
+      const body = TAXO.pending;
+      TAXO.pending = null;
+      $('taxoMask').classList.remove('show');
+      if (body) archPreviewFlow(body);
+    };
+  }
+  if ($('taxoPick')) {
+    $('taxoPick').onclick = () => {
+      dirPickerOpen($('taxoPath').value.trim() || S.dir, (p) => {
+        $('taxoPath').value = p;
+      });
+    };
+  }
+  if ($('taxoDoImport')) $('taxoDoImport').onclick = () => taxoDoImport();
 
   $('dirUse').onclick = () => {
     if (DP.onPick) DP.onPick(DP.path);
@@ -4961,7 +5320,8 @@ async function runStats(target) {
   $('statsPath').textContent = '统计范围：' + dir + '（含所有子文件夹）';
   $('statsPath').title = dir;
   $('statsBusy').hidden = false;
-  body.innerHTML = '<div class="st-loading">正在扫描并解析分类，请稍候…（首次遇到未缓存的物种会联网查 iNaturalist / GBIF）</div>';
+  body.innerHTML = '<div class="st-loading" id="stLoading">正在统计…</div>';
+  const stopWatch = statsWatch();
   try {
     const d = await api('/api/stats?path=' + enc(dir));
     if (!d.ok) throw new Error(d.error || '分析失败');
@@ -4972,9 +5332,44 @@ async function runStats(target) {
     STAB.done = false;
     body.innerHTML = '<div class="st-err">' + esc(e.message || e) + '</div>';
   } finally {
+    stopWatch();
     STAB.running = false;
     $('statsBusy').hidden = true;
   }
+}
+
+/**
+ * 统计期间盯着服务端进度：目录大时（上万张）要跑一会儿，
+ * 不能让用户只看到一句「请稍候」。每 700ms 拉一次 /api/stats/progress。
+ */
+function statsWatch() {
+  let timer = null;
+  let stopped = false;
+  const tick = async () => {
+    if (stopped) return;
+    try {
+      const p = await api('/api/stats/progress');
+      const el = $('stLoading');
+      if (el && p && p.active) {
+        const name = p.phase === 'walk' ? '正在列文件'
+          : p.phase === 'read' ? '正在读标签与拍摄时间'
+            : p.phase === 'taxonomy' ? '正在解析分类'
+              : '正在处理';
+        const cnt = p.total ? ` ${p.done}/${p.total}` : (p.done ? ` ${p.done}` : '');
+        const pct = p.total ? ` · ${Math.min(100, Math.round((p.done / p.total) * 100))}%` : '';
+        const sec = Math.max(1, Math.round((p.elapsed || 0) / 1000));
+        el.textContent = `${name}${cnt}${pct} · 已用 ${sec} 秒`;
+      }
+    } catch {
+      /* 轮询失败不打扰用户，下一次再试 */
+    }
+    if (!stopped) timer = setTimeout(tick, 700);
+  };
+  timer = setTimeout(tick, 350);
+  return () => {
+    stopped = true;
+    if (timer) clearTimeout(timer);
+  };
 }
 
 /* ---------------- 结果页 ---------------- */

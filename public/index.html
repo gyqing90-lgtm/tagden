@@ -150,6 +150,19 @@
     </div><!-- /statsView -->
 
     <div id="archiveView">
+      <!-- 本地名录没接入时的提醒条：归档不联网的前提是把名录放到本机 -->
+      <div class="taxo-dl-tip" id="taxoDlTip" hidden>
+        <span class="taxo-dl-ico">⤓</span>
+        <div class="taxo-dl-txt">
+          <b>建议先接入本地物种名录</b>
+          <span id="taxoDlTipTxt">没有名录时，每张图都要联网查分类，几千张会很慢，断网就全掉进「未分类」。</span>
+        </div>
+        <div class="taxo-dl-act">
+          <button id="taxoDlGet" class="primary mini">从百度网盘下载</button>
+          <button id="taxoDlImport" class="ghost mini" title="已经下载好了？指一下文件或文件夹就能接入">已有文件，导入…</button>
+          <button id="taxoDlHide" class="ghost mini" title="这次先不管（重新进页面还会提醒）">×</button>
+        </div>
+      </div>
       <div class="toolbar">
         <div class="crumbs"><span id="archCurPath"></span><em id="archSelInfo"></em></div>
         <div class="tools">
@@ -171,6 +184,8 @@
         </div>
         <button id="archAllBtn" class="ghost mini" title="勾上全部卡片">全选</button>
         <button id="archNoneBtn" class="ghost mini" title="取消全部勾选">清空</button>
+        <button id="archLocalBtn" class="ghost mini" title="本地物种名录（Chinese-Latin 的 backbone 数据库）：归档时优先用它解析界门纲目科属，不联网；点一下可以重新选文件夹">本地名录</button>
+        <span class="arch-hint" id="archLocalStat" title="归档时优先用本地名录解析分类；没有名录或名录里查不到才联网"></span>
         <span class="arch-hint" id="archHint">已经归档过的图会自动跳过，没有物种名的也会跳过。</span>
       </div>
       <div id="archGrid" class="grid"></div>
@@ -737,6 +752,33 @@
     <div class="sheet-actions">
       <button id="archGo" class="primary">开始归档</button>
       <button id="archCancel" class="ghost">取消</button>
+    </div>
+  </div>
+</div>
+
+<div class="mask" id="taxoMask">
+  <div class="sheet taxo">
+    <h3>本地物种名录（Chinese-Latin）</h3>
+    <p class="tip">归档时把「学名 → 界/门/纲/目/科/属 + 各阶元中文名」全部在本机算完，不联网。名录 2.6 GB，放到本机后归档几千张也就几秒。</p>
+    <ol class="taxo-steps">
+      <li>点「打开百度网盘」，登录后把 <b>Chinese-Latin</b> 保存到网盘再下载（这么大的文件建议用百度网盘客户端）。</li>
+      <li>下载完<b>不用回来点任何按钮</b>：程序每 2 秒看一眼下载文件夹，发现后自动解压、自动接入。</li>
+      <li>早就下好了？用下面「选择…」指到文件夹，或者把 zip 的路径粘进去，点「导入」。</li>
+    </ol>
+    <div class="taxo-prog" id="taxoProg" hidden>
+      <div class="bar"><div class="fill" id="taxoBar"></div></div>
+      <div class="ptext"><span id="taxoPhase"></span></div>
+    </div>
+    <div class="taxo-manual">
+      <input id="taxoPath" type="text" spellcheck="false" placeholder="路径：Chinese-Latin 文件夹 / backbone_中文.sqlite / xxx.zip">
+      <button id="taxoPick" class="ghost mini" title="选一个文件夹">选择…</button>
+      <button id="taxoDoImport" class="ghost mini">导入</button>
+    </div>
+    <div class="taxo-found" id="taxoFound" hidden></div>
+    <div class="sheet-actions">
+      <button id="taxoOpen" class="primary">打开百度网盘</button>
+      <button id="taxoSkip" class="ghost" hidden title="不装名录直接归档：会逐张联网查分类，慢很多">先不管，继续归档</button>
+      <button id="taxoClose" class="ghost">关闭</button>
     </div>
   </div>
 </div>
