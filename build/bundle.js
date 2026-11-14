@@ -38,6 +38,9 @@ const MODULES = [
   'lib/exif.js',
   'lib/imgmeta.js',
   'lib/labelcache.js',
+  // 本地《中国生物物种名录》与归档页名录下载/安装：漏了它们，源码正常但 exe 会报「模块未打包」
+  'lib/local-taxo.js',
+  'lib/taxo-fetch.js',
   'lib/taxonomy.js',
   'lib/stats.js',
   // 图库索引/搜索/重复文件：漏了它，exe 打开图库页会报「模块未打包」
