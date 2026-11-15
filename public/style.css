@@ -1449,6 +1449,198 @@ body.resizing {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.st-thumb figcaption em { display: block; font-style: normal; font-size: 10px; margin-top: 1px; }
+
+/* ---------- 统计仪表盘（对着「观鸟荣誉室」那套布局做的） ---------- */
+/* 热力图的四档色：浅色主题由浅到深，深色主题整体压暗，避免夜里刺眼 */
+:root {
+  --heat1: #d7e6da;
+  --heat2: #a9cbb5;
+  --heat3: #6ea88a;
+  --heat4: #2f6f4f;
+}
+
+.st-hero { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.st-hero-card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  padding: 13px 16px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.st-hero-top { display: flex; align-items: center; gap: 8px; color: var(--ink-3); font-size: 12px; }
+.st-hero-ico {
+  width: 22px; height: 22px;
+  border-radius: 7px;
+  display: grid; place-items: center;
+  background: var(--green-l);
+  color: var(--green);
+  flex: none;
+}
+.st-hero-num {
+  font-size: 27px;
+  line-height: 1.12;
+  font-weight: 700;
+  letter-spacing: -.4px;
+  font-variant-numeric: tabular-nums;
+}
+.st-hero-sub { font-size: 11.5px; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* 卡片右上角的切换按钮组 */
+.st-tools { margin-left: 10px; display: flex; }
+/* 卡头一行放不下时（窄卡 + 多组切换）允许换行，别把标题挤没 */
+.st-card > header { flex-wrap: wrap; row-gap: 6px; }
+.st-card > header .st-tools { margin-left: auto; }
+.st-segs {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg);
+}
+.st-seg {
+  border: 0;
+  background: transparent;
+  padding: 3px 9px;
+  font-size: 11.5px;
+  color: var(--ink-2);
+  border-right: 1px solid var(--line);
+  white-space: nowrap;
+}
+.st-seg:last-child { border-right: 0; }
+.st-seg:hover { background: var(--green-l); }
+.st-seg.on { background: var(--card); color: var(--ink); font-weight: 600; box-shadow: inset 0 -2px 0 var(--green); }
+.st-card > header .hint { max-width: 42%; }
+.st-card > header .hint + .st-tools { margin-left: 10px; }
+
+/* 时间线右上角四个小统计 */
+.st-minis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-bottom: 4px; }
+.st-mini {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 7px 10px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.st-mini span { font-size: 11px; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.st-mini b { font-size: 15px; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.st-mini.ok b { color: var(--green); }
+.st-mini.warn b { color: var(--amber); }
+
+.st-tl-block { margin-top: 12px; }
+.st-tl-cap { font-size: 11.5px; color: var(--ink-2); margin-bottom: 6px; display: flex; gap: 8px; align-items: baseline; }
+.st-tl-cap span { color: var(--ink-3); font-size: 11px; }
+
+/* 柱状图：上半区放柱子、下半区固定留给刻度，柱子高度用百分比不会被刻度挤掉 */
+.st-cols { display: flex; align-items: stretch; gap: 4px; height: 118px; }
+.st-col { flex: 1 1 0; min-width: 0; display: grid; grid-template-rows: 1fr 14px; }
+.st-col-bar {
+  align-self: end;
+  width: 100%;
+  position: relative;
+  min-height: 2px;
+  border-radius: 4px 4px 2px 2px;
+  background: linear-gradient(180deg, var(--green), var(--green-d));
+  transition: height .25s ease;
+}
+.st-col-bar span {
+  position: absolute;
+  top: -13px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 9.5px;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+.st-col-x { font-size: 9.5px; color: var(--ink-3); text-align: center; align-self: end; white-space: nowrap; overflow: hidden; }
+
+/* 口径提示条（对应参考图里那两条黄色小字） */
+.st-note-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+.st-note {
+  font-size: 11.5px;
+  padding: 3px 9px;
+  border-radius: 6px;
+  background: var(--green-l);
+  color: var(--green);
+  line-height: 1.5;
+}
+.st-note.warn { background: var(--amber-l); color: var(--amber); }
+
+/* 发现趋势 */
+#stTrendBox .st-cols { height: 132px; }
+.st-trend-foot { display: flex; flex-wrap: wrap; gap: 16px; font-size: 11.5px; color: var(--ink-3); margin-top: 8px; }
+.st-trend-foot b { color: var(--ink); font-variant-numeric: tabular-nums; }
+.st-delta b { color: var(--green); }
+.st-empty-mini { font-size: 12px; color: var(--ink-3); padding: 16px 6px; text-align: center; line-height: 1.7; }
+
+/* 活跃热力图 */
+.st-heat-wrap { display: flex; gap: 3px; overflow-x: auto; padding: 2px 0 4px; }
+.st-heat-col { display: grid; grid-template-rows: 13px repeat(7, 11px); gap: 3px; flex: none; }
+.st-heat-mon { font-size: 9px; color: var(--ink-3); white-space: nowrap; line-height: 13px; }
+.st-heat-cell { width: 11px; height: 11px; border-radius: 2.5px; display: block; background: var(--line-soft); }
+.st-heat-cell.lv0 { background: var(--line-soft); }
+.st-heat-cell.lv1 { background: var(--heat1); }
+.st-heat-cell.lv2 { background: var(--heat2); }
+.st-heat-cell.lv3 { background: var(--heat3); }
+.st-heat-cell.lv4 { background: var(--heat4); }
+.st-heat-cell.lv-1 { background: transparent; }
+.st-heat-foot { display: flex; justify-content: space-between; align-items: center; gap: 10px; font-size: 11px; color: var(--ink-3); margin-top: 4px; flex-wrap: wrap; }
+.st-heat-foot b { color: var(--ink); font-variant-numeric: tabular-nums; }
+.st-heat-legend { display: inline-flex; align-items: center; gap: 3px; }
+
+/* 分类排行榜 */
+.st-rank-row {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) 64px 34px;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 12px;
+}
+.st-rank-no { color: var(--ink-3); font-size: 11px; text-align: right; font-variant-numeric: tabular-nums; }
+.st-rank-nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.st-rank-nm i { font-style: italic; color: var(--ink-2); }
+.st-rank-cn { margin-left: 6px; color: var(--ink); }
+.st-rank-row .track { height: 6px; background: var(--line-soft); border-radius: 4px; overflow: hidden; }
+.st-rank-row .fill { display: block; height: 100%; background: var(--green); border-radius: 4px; }
+.st-rank-row .cnt { text-align: right; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+
+/* 器材 */
+.st-gear-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
+.st-gear-head b { font-size: 25px; font-weight: 700; color: var(--green); font-variant-numeric: tabular-nums; line-height: 1.1; }
+.st-gear-head span { font-size: 11.5px; color: var(--ink-3); }
+.st-gear-list { display: flex; flex-direction: column; gap: 2px; }
+.st-gear-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+  padding: 4px 0;
+  border-bottom: 1px dashed var(--line-soft);
+}
+.st-gear-row:last-child { border-bottom: 0; }
+.st-gear-row span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.st-gear-row b { color: var(--ink-2); font-variant-numeric: tabular-nums; flex: none; }
+
+html[data-theme="dark"] {
+  --heat1: #243128;
+  --heat2: #2c4636;
+  --heat3: #3d6a4f;
+  --heat4: #6fb28b;
+}
+
+@media (max-width: 1180px) {
+  .st-hero { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .st-minis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 
 .ov {
   background: var(--card);

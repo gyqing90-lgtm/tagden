@@ -3310,21 +3310,26 @@ async function analyzeStats(dir) {
     // 统计只用到时间/坐标；缩略图丢掉，上万张能省几十 MB
     const ex = label && label.meta ? { ...label.meta, thumb: null } : { ...EX.EMPTY };
     let taken = null;
+    let takenSrc = '';
     if (ex.dateTime) {
       const d = new Date(String(ex.dateTime).replace(' ', 'T'));
-      if (!Number.isNaN(d.getTime())) taken = d;
+      if (!Number.isNaN(d.getTime())) {
+        taken = d;
+        takenSrc = 'exif';
+      }
     }
     // 仿 bio-file：无 EXIF 拍摄时间时退回文件修改时间，让时间维度不至于全空
     if (!taken) {
       try {
         taken = new Date((await fsp.stat(f.full)).mtimeMs);
+        takenSrc = 'file';
       } catch {
         taken = null;
       }
     }
     readDone += 1;
     STAT_PROGRESS.done = readDone;
-    return { f, cn, latin, ex, taken };
+    return { f, cn, latin, ex, taken, takenSrc };
   });
 
   // 2) 批量解析分类（本地名录优先；本地没有才联网，见 lib/taxonomy.js）
@@ -3334,19 +3339,30 @@ async function analyzeStats(dir) {
   const taxoMap = await TAXO.resolve(items.map((it) => ({ latin: it.latin, cn: it.cn })));
   STAT_PROGRESS.done = STAT_PROGRESS.total;
 
-  // 3) 组装 records。GPS 用本地索引查省/市，不再联网；
-  //    TAGDEN_NO_GEOCODE=1 时连本地标签也不用，只保留文件夹名。
+  // 3) 组装 records。GPS 用本地索引查省/市，不再联网。
+  //    **没有 GPS 的图不给地区**：以前拿文件夹名顶替，地图/地区榜会被
+  //    「2024春游」这种文件夹名污染，用户看到的不是地理信息。
+  //    TAGDEN_NO_GEOCODE=1 时整体关闭地区统计。
   const records = [];
   for (const it of items) {
     const key = it.latin ? it.latin.toLowerCase() : `cn:${it.cn.toLowerCase()}`;
     const rec = taxoMap.get(key) || { ok: false, ranks: {} };
     const rk = (r) => (rec.ranks && rec.ranks[r]) || {};
     const labeled = !!(it.cn || it.latin);
-    let region = it.f.top || '根目录';
-    if (it.ex && it.ex.lat != null && it.ex.lon != null && process.env.TAGDEN_NO_GEOCODE !== '1') {
+    const hasGps = !!(it.ex && it.ex.lat != null && it.ex.lon != null);
+    let region = '';
+    if (hasGps && process.env.TAGDEN_NO_GEOCODE !== '1') {
       const g = REGIONS.labelFor(it.ex.lat, it.ex.lon);
-      if (g) region = g;
+      // 有坐标但离已知城市太远：保留一个坐标标签，别让这张图凭空消失
+      region = g || `${Number(it.ex.lat).toFixed(2)}°, ${Number(it.ex.lon).toFixed(2)}°`;
     }
+    // 机身名：Model 里通常已经带品牌（NIKON Z8 / iPhone 15），再拼一遍 Make 会变成
+    // 「NIKON CORPORATION NIKON Z8」这种废话，所以品牌重复时只留 Model。
+    const mk = String((it.ex && it.ex.make) || '').trim();
+    const md = String((it.ex && it.ex.model) || '').trim();
+    let body = md;
+    if (!body) body = mk;
+    else if (mk && !md.toLowerCase().includes(mk.split(/\s+/)[0].toLowerCase())) body = `${mk} ${md}`;
     records.push({
       labeled,
       taxon: {
@@ -3359,6 +3375,9 @@ async function analyzeStats(dir) {
         genus: rk('genus').latin, genusCn: rk('genus').cn,
         cn: it.cn, latin: it.latin,
       },
+      gps: hasGps,
+      takenSrc: it.takenSrc,
+      body,
       taken: it.taken,
       regionLabel: region,
       project: it.f.top || '根目录',
@@ -3376,6 +3395,8 @@ async function analyzeStats(dir) {
   const tree = STATS.buildTree(records);
   const unidentified = STATS.unidentifiedGroup(records);
 
+  // 5) 仪表盘用的几块：口径覆盖、时间线、趋势、热力图、器材、最近拍摄、排行榜。
+  //    时间线/热力图/最近拍摄按**全部照片**算（和鉴定无关）；趋势里的物种只算已鉴定。
   return {
     ok: true,
     path: root,
@@ -3385,6 +3406,18 @@ async function analyzeStats(dir) {
     dimensions: STATS.DIMENSIONS.map(([dim, label]) => ({ dim, label, data: dims[dim] })),
     tree,
     unidentified,
+    coverage: STATS.coverage(records),
+    timeline: STATS.timeline(records),
+    trend: STATS.trendByMonth(records),
+    heatmap: STATS.heatmap(records, 365),
+    gear: STATS.gear(records),
+    recent: STATS.recent(records, 12),
+    rankings: {
+      family: STATS.rankTable(records, 'family'),
+      genus: STATS.rankTable(records, 'genus'),
+      order: STATS.rankTable(records, 'order'),
+      species: STATS.rankTable(records, 'species'),
+    },
   };
 }
 

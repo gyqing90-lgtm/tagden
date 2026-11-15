@@ -5244,7 +5244,20 @@ function bindTabs() {
  * 结果页不分标签、所有板块一次铺开。
  */
 
-const STAB = { dir: '', subdirs: [], done: false, running: false };
+const STAB = {
+  dir: '',
+  subdirs: [],
+  done: false,
+  running: false,
+  data: null, // 上一次统计结果（切换图表时局部重绘要用）
+  // 各板块的显示选项：只影响呈现，不重新扫盘
+  ui: {
+    cat: { lang: 'cn' },
+    trend: { metric: 'species', mode: 'cum', range: 12 },
+    heat: { metric: 'photo', range: 365 },
+    rank: { rank: 'family', sort: 'count' },
+  },
+};
 
 /** 进标签页用：同一个文件夹已经算过就保留结果，否则回到文件夹列表 */
 function statsOpen() {
@@ -5428,56 +5441,377 @@ function stHierarchy(L) {
   return `<div class="st-hier"><div class="st-hier-cap">界 ⊃ 门 ⊃ 纲 ⊃ 目 ⊃ 科 ⊃ 属 ⊃ 种（逐级细分、层层包含）</div>${rows}</div>`;
 }
 
-function stCard(title, hint, inner, cls) {
-  return `<section class="st-card${cls ? ' ' + cls : ''}"><header><h4>${title}</h4>${hint ? `<span class="hint">${hint}</span>` : ''}</header><div class="st-card-body">${inner}</div></section>`;
+function stCard(title, hint, inner, cls, tools) {
+  return `<section class="st-card${cls ? ' ' + cls : ''}"><header><h4>${title}</h4>${hint ? `<span class="hint">${hint}</span>` : ''}${tools ? `<div class="st-tools">${tools}</div>` : ''}</header><div class="st-card-body">${inner}</div></section>`;
+}
+
+/* ---------------- 仪表盘：顶部指标卡 ----------------
+ * 对着「观鸟荣誉室」那种布局：四张独立白卡，图标在左上、数字很大、标签在下。
+ * 只放四个真正有意义的数：物种、照片、科、拍摄天数。
+ */
+
+function stHeroCard(label, value, sub, icon) {
+  return `<div class="st-hero-card">
+    <div class="st-hero-top"><span class="st-hero-ico">${icon}</span><span class="st-hero-label">${label}</span></div>
+    <b class="st-hero-num">${value}</b>
+    <span class="st-hero-sub">${sub || ''}</span>
+  </div>`;
+}
+
+const ST_ICONS = {
+  leaf: '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M20 4C10 4 4 9 4 16c0 2 1 4 1 4s2-6 8-8c-4 3-6 6-7 9" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M20 4c0 8-5 13-12 13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>',
+  photo: '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="8.5" cy="10" r="1.6" fill="currentColor"/><path d="M4 17l5-5 4 4 3-3 4 4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  layers: '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M12 3l9 5-9 5-9-5 9-5z" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M3 13l9 5 9-5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>',
+  cal: '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M3 10h18M8 3v4M16 3v4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>',
+};
+
+function stHero(d) {
+  const L = d.level || {};
+  const tl = d.timeline || {};
+  const span = tl.first && tl.last ? `${fmtDay(tl.first)} — ${fmtDay(tl.last)}` : '无拍摄时间';
+  return `<div class="st-hero">${stHeroCard('物种', L['种'] || 0, `${L['属'] || 0} 属 · ${L['科'] || 0} 科`, ST_ICONS.leaf)}
+    ${stHeroCard('照片总数', d.total || 0, `已鉴定 ${L['已鉴定'] || 0} 张`, ST_ICONS.photo)}
+    ${stHeroCard('科数量', L['科'] || 0, `目 ${L['目'] || 0} · 纲 ${L['纲'] || 0}`, ST_ICONS.layers)}
+    ${stHeroCard('拍摄天数', tl.dayCount || 0, span, ST_ICONS.cal)}</div>`;
+}
+
+function fmtDay(d) {
+  if (!d) return '';
+  // 兼容 Date、'2026-05-03 07:26:11'（后端本地时间）与 ISO
+  const dt = d instanceof Date ? d : new Date(String(d).replace(' ', 'T'));
+  if (Number.isNaN(dt.getTime())) return '';
+  return `${dt.getFullYear()}/${String(dt.getMonth() + 1).padStart(2, '0')}/${String(dt.getDate()).padStart(2, '0')}`;
+}
+
+/* ---------------- 仪表盘：摄影时间线 ----------------
+ * 年 / 月 / 时段三段，右上角四个小统计对应图里的
+ * 「本地照片 / 可信时间 / 文件时间 / 峰值时段」。
+ */
+
+function stMini(label, value, cls) {
+  return `<div class="st-mini${cls ? ' ' + cls : ''}"><span>${label}</span><b>${value}</b></div>`;
+}
+
+function stColChart(rows, opts) {
+  const o = opts || {};
+  const max = Math.max(1, ...rows.map((r) => r.count));
+  if (!rows.length) return '<div class="muted">没有数据</div>';
+  const bars = rows
+    .map((r) => {
+      const h = Math.max(2, Math.round((r.count / max) * 100));
+      const tip = `${r.name}：${r.count} 张`;
+      return `<div class="st-col" title="${esc(tip)}"><div class="st-col-bar" style="height:${h}%"><span>${r.count || ''}</span></div><div class="st-col-x">${esc(r.short || r.name)}</div></div>`;
+    })
+    .join('');
+  return `<div class="st-cols${o.cls ? ' ' + o.cls : ''}" style="--n:${rows.length}">${bars}</div>`;
+}
+
+function stTimeline(tl, cov) {
+  const total = cov.total || 0;
+  const exifPct = total ? Math.round((cov.timeExif / total) * 100) : 0;
+  const peak = tl.peak && tl.peak.count ? `${tl.peak.name} · ${tl.peak.count}` : '—';
+  const years = (tl.years || []).slice(0, 8).map((y) => ({ ...y, short: y.key }));
+  const months = Array.from({ length: 12 }, (_, i) => {
+    const hit = (tl.months || []).find((m) => m.month === i + 1);
+    return { name: `${i + 1} 月`, short: String(i + 1), count: hit ? hit.count : 0 };
+  });
+  const hours = (tl.hours || []).map((h) => ({ ...h, short: h.name }));
+  const note = `<div class="st-note-row">
+      <span class="st-note ok">${cov.timeExif || 0} 张使用真实拍摄时间</span>
+      <span class="st-note warn">${cov.timeFile || 0} 张缺少拍摄时间，已暂用文件修改时间参与统计</span>
+    </div>`;
+  const inner = `<div class="st-minis">
+      ${stMini('照片', total)}
+      ${stMini('可信时间', exifPct + '%', 'ok')}
+      ${stMini('文件时间', cov.timeFile || 0, 'warn')}
+      ${stMini('峰值时段', peak)}
+    </div>
+    <div class="st-tl-block"><div class="st-tl-cap">按年份 <span>EXIF 拍摄时间优先</span></div>${years.length ? stColChart(years) : '<div class="muted">没有可用时间</div>'}</div>
+    <div class="st-tl-block"><div class="st-tl-cap">按月份 <span>看物候节律，跨年合并</span></div>${stColChart(months)}</div>
+    <div class="st-tl-block"><div class="st-tl-cap">按时段 <span>日出日暮，虫子最活跃的时刻</span></div>${stColChart(hours)}</div>
+    ${note}`;
+  return inner;
+}
+
+/* ---------------- 仪表盘：分类目录（支持中文 / 拉丁切换） ---------------- */
+
+function catLabel(node, lang) {
+  if (lang === 'latin') return node.latin || node.name;
+  if (node.cn && node.latin) return `${node.cn} ${node.latin}`;
+  return node.name;
+}
+
+function catTreeHtml(node, depth, lang) {
+  const d = depth || 0;
+  const has = node.children && node.children.length;
+  const open = d < 1;
+  const tw = has ? `<span class="tw">${open ? '▾' : '▸'}</span>` : '<span class="tw"></span>';
+  let s = `<li><span class="snode${node.leaf ? ' leaf' : ''}">${tw}<span class="nm">${esc(catLabel(node, lang))}</span><span class="c">${node.count}</span></span>`;
+  if (has) {
+    s += `<ul class="stree${d === 0 ? ' root' : ''}"${open ? '' : ' style="display:none"'}>`;
+    for (const c of node.children) s += catTreeHtml(c, d + 1, lang);
+    s += '</ul>';
+  }
+  return s + '</li>';
+}
+
+function paintCat() {
+  const box = $('stree');
+  if (!box || !STAB.data) return;
+  const lang = STAB.ui.cat.lang;
+  box.innerHTML = catTreeHtml(STAB.data.tree, 0, lang);
+  box.querySelectorAll('.snode').forEach((n) => {
+    n.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const ul = n.parentElement.querySelector(':scope > ul.stree');
+      if (ul) ul.style.display = ul.style.display === 'none' ? '' : 'none';
+      const tw = n.querySelector('.tw');
+      if (tw) tw.textContent = ul && ul.style.display === 'none' ? '▸' : '▾';
+    });
+  });
+}
+
+/* ---------------- 仪表盘：发现趋势 ----------------
+ * 物种 / 照片 × 新增 / 累计，区间 6M/12M/24M/All。
+ * 累计照片是前端顺着月份加出来的，后端只给每月原始张数。
+ */
+
+function trendSeries(tr) {
+  const ui = STAB.ui.trend;
+  const all = tr || [];
+  const n = ui.range ? Number(ui.range) : all.length;
+  const rows = all.slice(Math.max(0, all.length - n));
+  let run = 0;
+  const series = rows.map((m) => {
+    run += m.photos;
+    const isSp = ui.metric === 'species';
+    const value = isSp ? (ui.mode === 'cum' ? m.cum : m.born) : ui.mode === 'cum' ? run : m.photos;
+    return { key: m.key, value, month: m.exifMonth || m.key };
+  });
+  return series.map((s) => ({ name: s.key, short: s.key.slice(2).replace('-', '/'), count: s.value }));
+}
+
+function paintTrend() {
+  const box = $('stTrendBox');
+  if (!box || !STAB.data) return;
+  const tr = STAB.data.trend || [];
+  const rows = trendSeries(tr);
+  const ui = STAB.ui.trend;
+  let body;
+  if (!rows.length) {
+    body = '<div class="st-empty-mini">还没有带拍摄时间的照片，趋势要等有 EXIF 时间的图。</div>';
+  } else {
+    const last = rows[rows.length - 1];
+    const prev = rows[rows.length - 2];
+    const peak = rows.slice().sort((a, b) => b.count - a.count)[0];
+    const avg = Math.round(rows.reduce((s, r) => s + r.count, 0) / rows.length);
+    let delta = '—';
+    if (prev && prev.count) {
+      const pct = Math.round(((last.count - prev.count) / prev.count) * 100);
+      delta = `${pct >= 0 ? '+' : ''}${pct}%`;
+    } else if (prev && !prev.count && last.count) {
+      delta = '本月新增';
+    }
+    body = `<div class="st-trend-main">${stColChart(rows)}</div>
+      <div class="st-trend-foot">
+        <span>峰值月：<b>${esc(peak.name)}</b>（${peak.count}）</span>
+        <span>月均：<b>${avg}</b></span>
+        <span class="st-delta">较上月：<b>${esc(delta)}</b></span>
+      </div>`;
+  }
+  box.innerHTML = body;
+}
+
+/* ---------------- 仪表盘：活跃热力图（GitHub 风格） ---------------- */
+
+function heatLevel(n, max) {
+  if (!n) return 0;
+  const r = n / Math.max(1, max);
+  if (r > 0.75) return 4;
+  if (r > 0.5) return 3;
+  if (r > 0.25) return 2;
+  return 1;
+}
+
+function paintHeat() {
+  const box = $('stHeatBox');
+  if (!box || !STAB.data) return;
+  const hm = STAB.data.heatmap || { days: [], max: 1, maxSp: 1 };
+  const ui = STAB.ui.heat;
+  const metric = ui.metric;
+  const spanDays = Number(ui.range) || 365;
+  const end = new Date(hm.end || Date.now());
+  end.setHours(0, 0, 0, 0);
+  const start = new Date(end.getTime() - (spanDays - 1) * 86400000);
+  const map = new Map();
+  for (const it of hm.days || []) map.set(it.d, it);
+  const max = Math.max(1, metric === 'species' ? hm.maxSp || 1 : hm.max || 1);
+
+  // 从 start 所在那一周的周日开始铺，保证每列 7 格对齐
+  const pad = start.getDay();
+  const firstCell = new Date(start.getTime() - pad * 86400000);
+  const cells = [];
+  const totalDays = Math.round((end - firstCell) / 86400000) + 1;
+  let active = 0;
+  for (let i = 0; i < totalDays; i += 1) {
+    const d = new Date(firstCell.getTime() + i * 86400000);
+    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const rec = map.get(key);
+    const inRange = d >= start && d <= end;
+    const n = inRange && rec ? (metric === 'species' ? rec.sp : rec.n) : 0;
+    if (n) active += 1;
+    cells.push({ key, n, inRange, lv: inRange ? heatLevel(n, max) : -1, title: inRange ? `${key}：${n}${metric === 'species' ? ' 种' : ' 张'}` : '' });
+  }
+  // 月份标签：每列是 7 天，取该列第一天所在月，跨月才标
+  let cols = '';
+  for (let i = 0; i < cells.length; i += 7) {
+    const week = cells.slice(i, i + 7);
+    const d0 = new Date(firstCell.getTime() + i * 86400000);
+    const isMonthStart = d0.getDate() <= 7;
+    cols += `<div class="st-heat-col">${isMonthStart ? `<span class="st-heat-mon">${d0.getMonth() + 1}月</span>` : '<span class="st-heat-mon"></span>'}${week.map((c) => `<i class="st-heat-cell lv${c.lv}" title="${esc(c.title)}"></i>`).join('')}</div>`;
+  }
+  box.innerHTML = `<div class="st-heat-wrap">${cols}</div>
+    <div class="st-heat-foot">
+      <span>${spanDays} 天内活跃 <b>${active}</b> 天</span>
+      <span class="st-heat-legend">Less <i class="st-heat-cell lv0"></i><i class="st-heat-cell lv1"></i><i class="st-heat-cell lv2"></i><i class="st-heat-cell lv3"></i><i class="st-heat-cell lv4"></i> More</span>
+    </div>`;
+}
+
+/* ---------------- 仪表盘：分类排行榜 ---------------- */
+
+function paintRank() {
+  const box = $('stRankBox');
+  if (!box || !STAB.data) return;
+  const ui = STAB.ui.rank;
+  const rows = (STAB.data.rankings || {})[ui.rank] || [];
+  if (!rows.length) {
+    box.innerHTML = '<div class="st-empty-mini">这个层级还没有数据，先标注并解析分类。</div>';
+    return;
+  }
+  const sorted = rows.slice().sort((a, b) => (ui.sort === 'latin' ? a.latin.localeCompare(b.latin) : b.count - a.count || a.latin.localeCompare(b.latin)));
+  const top = sorted.slice(0, 12);
+  const max = Math.max(1, ...top.map((r) => r.count));
+  box.innerHTML = top
+    .map((r, i) => {
+      const w = Math.max(3, Math.round((r.count / max) * 100));
+      const cn = r.cn ? `<span class="st-rank-cn">${esc(r.cn)}</span>` : '';
+      return `<div class="st-rank-row"><span class="st-rank-no">${i + 1}</span>
+        <span class="st-rank-nm"><i>${esc(r.latin)}</i>${cn}</span>
+        <span class="track"><span class="fill" style="width:${w}%"></span></span>
+        <span class="cnt">${r.count}</span></div>`;
+    })
+    .join('');
+}
+
+/* ---------------- 仪表盘：器材 ---------------- */
+
+function stGear(g) {
+  const rate = Math.round((g.rate || 0) * 100);
+  const bodies = (g.bodies || []).slice(0, 6);
+  let inner = `<div class="st-gear-head"><b>${rate}%</b><span>${g.covered || 0} / ${g.total || 0} 张带机身信息</span></div>`;
+  if (!bodies.length) {
+    inner += '<div class="st-empty-mini">这些照片没有相机或手机型号信息（EXIF 被清掉、截图或二次导出都会这样），所以器材统计为空。</div>';
+  } else {
+    inner += '<div class="st-gear-list">' + bodies.map((b) => `<div class="st-gear-row"><span title="${esc(b.name)}">${esc(b.name)}</span><b>${b.count}</b></div>`).join('') + '</div>';
+  }
+  return inner;
+}
+
+/* ---------------- 仪表盘：最近拍摄 ---------------- */
+
+function stRecentBlock(rows) {
+  if (!rows || !rows.length) return '<div class="st-empty-mini">还没有带时间的照片。</div>';
+  return `<div class="st-thumbs">${rows
+    .map((it) => `<figure class="st-thumb" title="${esc(it.stem + ' · ' + fmtDay(it.taken))}"><img loading="lazy" decoding="async" src="/img?path=${enc(it.path)}&amp;thumb=1" alt=""><figcaption>${esc(it.cn || it.stem)}<em>${esc(fmtDay(it.taken))}</em></figcaption></figure>`)
+    .join('')}</div>`;
+}
+
+function stSeg(st, items, cur) {
+  return items
+    .map(([v, label]) => `<button class="st-seg${String(v) === String(cur) ? ' on' : ''}" data-st="${st}" data-v="${v}">${label}</button>`)
+    .join('');
+}
+
+/** 行政区域卡：只统计带 GPS 的图，无坐标的既不算「未知地区」也不拿文件夹名顶替 */
+function stRegionBox(rows, cov) {
+  const withGps = cov.gps || 0;
+  const head = `<div class="st-note-row">
+      <span class="st-note ok">${withGps} 张带 GPS，参与地区统计</span>
+      <span class="st-note warn">${cov.noGps || 0} 张没有坐标，不计入</span>
+    </div>`;
+  if (!withGps) {
+    return `<div class="st-empty-mini">没有一张照片带 GPS，所以这里不做地区统计 —— 按文件夹名编出来的「地区」不是地理信息。</div>${head}`;
+  }
+  return stBars(rows, 10) + head;
 }
 
 function renderStats(d) {
-  const L = d.level;
+  STAB.data = d;
+  const L = d.level || {};
+  const cov = d.coverage || { total: d.total, gps: 0, noGps: d.total, timeExif: 0, timeFile: 0 };
   const dim = (n) => (d.dimensions.find((x) => x.dim === n) || { data: [] }).data;
   const un = d.unidentified || { count: 0, byFolder: [], list: [] };
+  const ui = STAB.ui;
 
-  // ① 顶部一排数字（顺序对着 bio-file：总图片 → 已识别 → 未识别 → 种属科目纲门界）
-  const kpis = [
-    ['总图片', d.total, ''],
-    ['已识别', L['已鉴定'], 'ok'],
-    ['未识别', L['未鉴定'], 'warn'],
-    ['物种', L['种'], ''],
-    ['属', L['属'], ''],
-    ['科', L['科'], ''],
-    ['目', L['目'], ''],
-    ['纲', L['纲'], ''],
-    ['门', L['门'], ''],
-    ['界', L['界'], ''],
-  ];
-  const pct = d.total ? Math.max(0, Math.min(100, Math.round(((L['已鉴定'] || 0) / d.total) * 100))) : 0;
-  let html = `<div class="st-summary">
-    <div class="st-donut" style="--pct:${pct}%"><div><b>${pct}%</b><span>已鉴定</span></div></div>
-    <div class="st-summary-cards">
-      <div><b>${d.total || 0}</b><span>总照片</span></div>
-      <div><b>${L['已鉴定'] || 0}</b><span>已识别</span></div>
-      <div><b>${L['种'] || 0}</b><span>物种</span></div>
-      <div><b>${L['未鉴定'] || 0}</b><span>未识别</span></div>
-    </div>
-  </div>`;
-  html += '<div class="st-kpis">';
-  for (const [label, n, cls] of kpis) html += `<div class="kpi ${cls}"><b>${n || 0}</b><span>${label}</span></div>`;
-  html += '</div>';
+  // 顶部四张指标卡（对应参考图的「生涯鸟种 / 照片总数 / 存储占用 / 科数量」）
+  let html = stHero(d);
 
-  // ② 所有板块一次铺开
   html += '<div class="st-grid">';
-  html += stCard('分类树', '点节点展开 / 收起', '<div class="stree-box" id="stree"></div>', 'span2');
-  html += stCard('行政区域', '离线索引；没有坐标或离城市太远按文件夹归', stBars(dim('region'), 10));
 
+  // ① 摄影时间线：年 / 月 / 时段 + 时间可信度
+  html += stCard('摄影时间线', '年 / 月 / 时段；缺 EXIF 时间退回文件时间', stTimeline(d.timeline || { years: [], months: [], hours: [] }, cov), 'span2');
+
+  // ② 分类目录：支持「中文 / 拉丁」切换
+  html += stCard('分类目录', '界 → 科 → 属 → 种', '<div class="stree-box" id="stree"></div>', '', `<div class="st-segs">${stSeg('cat', [['cn', '中文'], ['latin', '拉丁']], ui.cat.lang)}</div>`);
+
+  // ③ 发现趋势：物种/照片 × 新增/累计 × 区间
+  html += stCard(
+    '发现趋势',
+    '物种按首见月算新增',
+    '<div id="stTrendBox"></div>',
+    'span2',
+    `<div class="st-segs">
+      ${stSeg('trend.metric', [['species', '物种'], ['photo', '照片']], ui.trend.metric)}
+      ${stSeg('trend.mode', [['new', '新增'], ['cum', '累计']], ui.trend.mode)}
+      ${stSeg('trend.range', [['6', '6M'], ['12', '12M'], ['24', '24M'], ['0', 'All']], ui.trend.range)}
+    </div>`
+  );
+
+  // ④ 分类排行榜
+  html += stCard(
+    '分类排行榜',
+    '按分类层级排名',
+    '<div id="stRankBox"></div>',
+    '',
+    `<div class="st-segs">
+      ${stSeg('rank.rank', [['order', '目'], ['family', '科'], ['genus', '属'], ['species', '种']], ui.rank.rank)}
+      ${stSeg('rank.sort', [['count', '数量'], ['latin', '学名']], ui.rank.sort)}
+    </div>`
+  );
+
+  // ⑤ 活跃热力图 + 器材
+  html += stCard(
+    '活跃热力图',
+    '每天拍了多少',
+    '<div id="stHeatBox"></div>',
+    'span2',
+    `<div class="st-segs">
+      ${stSeg('heat.metric', [['photo', '照片'], ['species', '物种']], ui.heat.metric)}
+      ${stSeg('heat.range', [['90', '90D'], ['180', '180D'], ['365', '365D']], ui.heat.range)}
+    </div>`
+  );
+  html += stCard('器材', '相机与手机覆盖率', stGear(d.gear || { bodies: [], rate: 0, covered: 0, total: 0 }));
+
+  // ⑥ 最近拍摄 + 行政区域
+  html += stCard('最近拍摄', '快速回看最新照片', stRecentBlock(d.recent || []), 'span2');
+  html += stCard('行政区域', '只统计带 GPS 的图', stRegionBox(dim('region'), cov));
+
+  // ⑦ 原有板块保留
   html += stCard('分类层级分布', '层层包含 · 逐级细分', stHierarchy(L));
   html += stCard('按物种', '仅统计已鉴定 · Top 12', stBars(dim('species'), 12, true));
-  html += stCard('按项目', '顶层子文件夹', stBars(dim('project'), 8, true));
-
   html += stCard('按文件夹', 'Top 10', stBars(dim('folder'), 10));
-  html += stCard('按时间（季节）', 'EXIF 拍摄时间，缺失用文件时间', stBars(dim('time_season'), 8, true));
-  html += stCard('按年份', 'Top 8', stBars(dim('time_year'), 8));
 
-  // ③ 未鉴定：数字 + 按文件夹 + 缩略图
+  // ⑧ 未鉴定
   let unInner;
   if (!un.count) {
     unInner = '<div class="muted">没有未鉴定的图片，全部都已标注 ✓</div>';
@@ -5498,43 +5832,39 @@ function renderStats(d) {
   html += stCard('未鉴定', `${un.count} 张 · 数字 + 按文件夹分组`, unInner, 'span3');
 
   html += '</div>';
-  html += `<div class="un-note">共 ${d.total} 张图，其中已鉴定 ${L['已鉴定'] || 0} 张、未鉴定 ${L['未鉴定'] || 0} 张${d.truncated ? '（已达单次上限，结果不完整）' : ''}。</div>`;
+  html += `<div class="un-note">共 ${d.total} 张图，其中已鉴定 ${L['已鉴定'] || 0} 张、未鉴定 ${L['未鉴定'] || 0} 张${d.truncated ? '（已达单次上限，结果不完整）' : ''}。地区只统计带 GPS 的 ${cov.gps || 0} 张。</div>`;
   html += '<div class="un-note" style="margin-top:2px">行政区划索引：<a href="https://www.geonames.org/" target="_blank" rel="noreferrer">GeoNames</a>（CC BY 4.0），离线内置，不联网。</div>';
 
   $('statsBody').innerHTML = html;
-  renderStatsTree(d.tree);
-}
+  paintCat();
+  paintTrend();
+  paintHeat();
+  paintRank();
 
-/* 注意：函数名不能叫 renderTree —— 左侧文件夹树已经有一个 renderTree()，
-   同名函数声明会互相覆盖（后声明的赢），把左边的磁盘树搞坏。 */
-function renderStatsTree(node) {
-  const el = $('stree');
-  if (!el) return;
-  el.innerHTML = statsTreeHtml(node);
-  el.querySelectorAll('.snode').forEach((n) => {
-    n.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const ul = n.parentElement.querySelector(':scope > ul.stree');
-      if (ul) ul.style.display = ul.style.display === 'none' ? '' : 'none';
-      const tw = n.querySelector('.tw');
-      if (tw) tw.textContent = ul && ul.style.display === 'none' ? '▸' : '▾';
-    });
-  });
-}
-
-function statsTreeHtml(node, depth) {
-  const d = depth || 0;
-  const has = node.children && node.children.length;
-  // 根和第一层直接展开，再往下先收起来，免得一屏全是树
-  const open = d < 1;
-  const tw = has ? `<span class="tw">${open ? '▾' : '▸'}</span>` : '<span class="tw"></span>';
-  let s = '<li><span class="snode' + (node.leaf ? ' leaf' : '') + '">' + tw + '<span class="nm">' + esc(node.name) + '</span><span class="c">' + node.count + '</span></span>';
-  if (has) {
-    s += '<ul class="stree' + (d === 0 ? ' root' : '') + '"' + (open ? '' : ' style="display:none"') + '>';
-    for (const c of node.children) s += statsTreeHtml(c, d + 1);
-    s += '</ul>';
-  }
-  return s + '</li>';
+  // 局部重绘：切换按钮只换对应的卡，不重新扫盘、也不丢其他卡的展开状态
+  $('statsBody').onclick = (e) => {
+    const btn = e.target.closest('.st-seg');
+    if (!btn) return;
+    const st = btn.dataset.st || '';
+    const val = btn.dataset.v;
+    if (st === 'cat') {
+      ui.cat.lang = val;
+      paintCat();
+    } else if (st.startsWith('trend.')) {
+      const k = st.slice(6);
+      ui.trend[k] = k === 'range' ? Number(val) : val;
+      paintTrend();
+    } else if (st.startsWith('heat.')) {
+      const k = st.slice(5);
+      ui.heat[k] = k === 'range' ? Number(val) : val;
+      paintHeat();
+    } else if (st.startsWith('rank.')) {
+      ui.rank[st.slice(5)] = val;
+      paintRank();
+    }
+    const segs = btn.parentElement;
+    if (segs) for (const b of segs.querySelectorAll('.st-seg')) b.classList.toggle('on', b === btn);
+  };
 }
 
 /* ---------------- 「自然在线」标签页 ----------------
