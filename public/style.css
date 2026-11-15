@@ -1538,9 +1538,11 @@ body.resizing {
 .st-tl-cap { font-size: 11.5px; color: var(--ink-2); margin-bottom: 6px; display: flex; gap: 8px; align-items: baseline; }
 .st-tl-cap span { color: var(--ink-3); font-size: 11px; }
 
-/* 柱状图：上半区放柱子、下半区固定留给刻度，柱子高度用百分比不会被刻度挤掉 */
-.st-cols { display: flex; align-items: stretch; gap: 4px; height: 118px; }
-.st-col { flex: 1 1 0; min-width: 0; display: grid; grid-template-rows: 1fr 14px; }
+/* 柱状图：上半区放柱子、下半区固定留给刻度，柱子高度用百分比不会被刻度挤掉。
+   max-width 是必须的：只有 1 个年份时 flex:1 会让那根柱子铺满整行，看着像一块绿板子；
+   加上上限后少数据时是窄柱居中，12 个月的月份图仍然能铺满。 */
+.st-cols { display: flex; align-items: stretch; justify-content: center; gap: 4px; height: 118px; }
+.st-col { flex: 1 1 0; min-width: 0; max-width: 64px; display: grid; grid-template-rows: 1fr 14px; }
 .st-col-bar {
   align-self: end;
   width: 100%;
@@ -3930,3 +3932,175 @@ html[data-theme="dark"] .rail-collapse {
 }
 html[data-theme="dark"] .album-rail .ar-item:hover { background: #243129; }
 html[data-theme="dark"] .album-rail .ar-item.on { background: var(--green-l); color: var(--green-d); }
+
+/* =====================================================================
+   0.9.1：深色模式补漏
+   ---------------------------------------------------------------------
+   这几处早期把底色写死成 #fff / 奶油色，深色模式没跟着改，一开深色就是
+   一片白（其中最难受的是左栏「相册端」：白底 + 白字，等于字看不见）。
+   文件末尾追加，靠「后写覆盖」压掉前面的写死值。
+   ===================================================================== */
+html[data-theme="dark"] .seg button {
+  background: var(--card);
+  color: var(--ink-2);
+}
+html[data-theme="dark"] .seg button.on {
+  background: var(--green-l);
+  color: var(--green-d);
+}
+html[data-theme="dark"] .seg button:disabled {
+  background: var(--line-soft);
+  color: var(--ink-3);
+}
+html[data-theme="dark"] .pathbox button,
+html[data-theme="dark"] .places button {
+  background: var(--card);
+  border-color: var(--line);
+  color: var(--ink-2);
+}
+html[data-theme="dark"] .places button:hover {
+  border-color: var(--green);
+  color: var(--green-d);
+}
+html[data-theme="dark"] .rail-refresh:hover {
+  background: #243129;
+  border-color: #3b4a40;
+  color: var(--green-d);
+}
+/* 文件夹卡片的奶油底板：深色下换成和图片缩略图骨架同一档的深绿 */
+html[data-theme="dark"] .card.folder .thumb.fold {
+  background: linear-gradient(180deg, #202a24, #182119);
+}
+
+/* ---------- 深色：表单与浅底卡片 ---------- */
+html[data-theme="dark"] .pager,
+html[data-theme="dark"] .cand,
+html[data-theme="dark"] .opt-input,
+html[data-theme="dark"] .pvs-row,
+html[data-theme="dark"] .agg-site,
+html[data-theme="dark"] .agg-table th,
+html[data-theme="dark"] .agg-sugs,
+html[data-theme="dark"] .gx-chip,
+html[data-theme="dark"] .gx-extra span,
+html[data-theme="dark"] .arch-list,
+html[data-theme="dark"] .stab,
+html[data-theme="dark"] .sc-below,
+html[data-theme="dark"] .ne-cand,
+html[data-theme="dark"] .destbox input,
+html[data-theme="dark"] .nw input[type="text"],
+html[data-theme="dark"] .nat-cap,
+html[data-theme="dark"] .nat-login input,
+html[data-theme="dark"] .nat-to-new input,
+html[data-theme="dark"] .nat-newalbum input,
+html[data-theme="dark"] .nat-filter input,
+html[data-theme="dark"] .nat-sel,
+html[data-theme="dark"] .sc-loc-row > input,
+html[data-theme="dark"] .sc-cfg-row > input[readonly],
+html[data-theme="dark"] .pager .pg-size select,
+html[data-theme="dark"] .preset select,
+html[data-theme="dark"] .agg-place-l select,
+html[data-theme="dark"] .nat-up-mode select,
+html[data-theme="dark"] .cfg-migrate .cfg-pass input {
+  background: var(--card);
+  border-color: var(--line);
+  color: var(--ink);
+}
+/* 详情面板的照片底板：深色下用近黑，白图才不会发光 */
+html[data-theme="dark"] .preview { background: #0d130f; }
+
+/* 未选中 / 不可用的胶囊按钮 */
+html[data-theme="dark"] .chip.off { background: var(--line-soft); color: var(--ink-3); border-color: var(--line); }
+html[data-theme="dark"] .chip.on:hover { background: #2a4436; }
+html[data-theme="dark"] .chip.na { background: #1a231d; color: #55645b; border-color: var(--line); }
+
+/* 「跳过 / 失败」这类状态底色：浅色下是淡灰淡红，深色下要压成暗色块 */
+html[data-theme="dark"] .pvs-row.skipped,
+html[data-theme="dark"] .pvs-row.empty,
+html[data-theme="dark"] .agg-site.skipped,
+html[data-theme="dark"] .agg-pill.off,
+html[data-theme="dark"] .agg-badge.gray {
+  background: var(--line-soft);
+  border-color: var(--line);
+  color: var(--ink-2);
+}
+html[data-theme="dark"] .pvs-row.failed,
+html[data-theme="dark"] .agg-site.failed,
+html[data-theme="dark"] .sd-ai .err,
+html[data-theme="dark"] .sd-tags span,
+html[data-theme="dark"] .sd-none .err {
+  background: #3a2320;
+  border-color: #5a3630;
+  color: #eaa79c;
+}
+html[data-theme="dark"] .sd-strict {
+  background: var(--amber-l);
+  border-color: #5a4630;
+  color: var(--amber);
+}
+
+/* 进度条 / 排名条：浅绿在深色下发亮，换成低饱和绿 */
+html[data-theme="dark"] .hier-row .track { background: #26312a; }
+html[data-theme="dark"] .bar-row .fill { background: linear-gradient(90deg, #2f5a44, #4f8f6c); }
+html[data-theme="dark"] .st-col-bar { background: linear-gradient(180deg, #3f7a5b, #5e9d79); }
+html[data-theme="dark"] .nat-progress .bar { background: var(--line-soft); }
+
+/* 缩略图角标（白底小牌） */
+html[data-theme="dark"] .badge.unknown { background: rgba(27, 36, 30, .92); color: var(--ink-2); }
+html[data-theme="dark"] .badge.busy { background: rgba(34, 53, 42, .94); color: var(--green-d); }
+
+/* 顶上的「发现新版本」条：浅绿整条太扎眼，改成低亮度绿底 */
+html[data-theme="dark"] .upbar {
+  background: #23402f;
+  color: #dcefe2;
+  border-bottom: 1px solid #2f503c;
+}
+html[data-theme="dark"] .upbar-notes { color: rgba(220, 239, 226, .76); }
+html[data-theme="dark"] .upbar button {
+  background: rgba(255, 255, 255, .08);
+  border-color: rgba(255, 255, 255, .2);
+  color: #dcefe2;
+}
+html[data-theme="dark"] .upbar button:hover { background: rgba(255, 255, 255, .16); }
+html[data-theme="dark"] .upbar .upbar-go {
+  background: var(--green);
+  border-color: var(--green);
+  color: #102016;
+}
+html[data-theme="dark"] .upbar.busy,
+html[data-theme="dark"] .upbar.done { background: #23402f; }
+html[data-theme="dark"] .upbar.fail { background: #4a2a24; color: #f0c8bf; }
+
+/* ---------- 深色：带色的浅底（蓝系 / 绿系 / 警示色） ---------- */
+html[data-theme="dark"] button.primary:disabled { background: #33443a; color: var(--ink-3); }
+html[data-theme="dark"] button.accent {
+  background: #1b2a3a;
+  border-color: #2f4a66;
+  color: #8fb6de;
+}
+html[data-theme="dark"] button.accent:hover:not(:disabled) { background: #22354a; border-color: #3f6389; }
+html[data-theme="dark"] .grid .card .idr.pending {
+  background: #1b2a3a;
+  border-color: #2f4a66;
+  color: #8fb6de;
+}
+html[data-theme="dark"] .gx-chip[data-gx="inat"] { background: #24301c; border-color: #3b4a2a; color: #b9d08a; }
+html[data-theme="dark"] .gx-chip[data-gx="ppbc"] { background: #1c2a33; border-color: #2f4655; color: #9cc4e0; }
+html[data-theme="dark"] .gx-chip[data-gx="nature"] { background: #1d2c23; border-color: #2f4a38; color: #9fc9ad; }
+html[data-theme="dark"] .gx-chip[data-gx="gbif"] { background: #2f2718; border-color: #4d3f28; color: #dcb877; }
+
+/* ---------- 深色：写名对话框 / 图库 / 相册里剩下的白 ---------- */
+html[data-theme="dark"] .nw-taxa { background: var(--line-soft); }
+html[data-theme="dark"] .nw-chip { background: var(--card); border-color: var(--line); color: var(--ink-2); }
+html[data-theme="dark"] .nw-row.sel { background: #22352a; }
+html[data-theme="dark"] .nw-result.bad { background: #3a2320; color: #eaa79c; }
+html[data-theme="dark"] .nat-filter select,
+html[data-theme="dark"] .lib-searchbar select {
+  background: var(--card);
+  border-color: var(--line);
+  color: var(--ink-2);
+}
+html[data-theme="dark"] .nat-album .del:hover,
+html[data-theme="dark"] #natDelBtn:not(:disabled):hover {
+  background: #3a2320;
+  border-color: #5a3630;
+}
