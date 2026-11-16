@@ -679,6 +679,29 @@ button.ghost.mini {
   background: #fff;
 }
 .author-line { margin: 8px 0 0; font-size: 12px; color: var(--ink-3); letter-spacing: .2px; }
+/* 诊断包：和二维码区分开，放在一条浅底框里，别让人以为要扫码才能用 */
+.diag-box {
+  margin-top: 14px;
+  padding: 10px 12px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, .025);
+  text-align: center;
+}
+.diag-box .tip { margin: 0 0 8px; font-size: 12px; color: var(--ink-3); line-height: 1.5; }
+.diag-out { margin: 8px 0 0; font-size: 12px; line-height: 1.7; word-break: break-all; }
+.diag-out .diag-path {
+  display: inline-block;
+  margin: 2px 4px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--line-soft);
+  font-size: 11px;
+  vertical-align: middle;
+}
+.diag-out .muted { display: block; margin-top: 4px; color: var(--ink-3); font-size: 11px; }
+.diag-out .bad { color: var(--red, #c0392b); }
+html[data-theme="dark"] .diag-box { background: rgba(255, 255, 255, .04); }
 .sheet-actions { display: flex; justify-content: center; margin-top: 14px; }
 
 /* ---------- 各站结果（右侧面板） ---------- */

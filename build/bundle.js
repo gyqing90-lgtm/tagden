@@ -43,6 +43,11 @@ const MODULES = [
   'lib/taxo-fetch.js',
   'lib/taxonomy.js',
   'lib/stats.js',
+  // 名录导出的 RTF 生成器：漏了它，导出「附录格式名录」在 exe 里会报「模块未打包」
+  'lib/species-rtf.js',
+  // 诊断包（服务器里 require('../build/zip') 打 zip）：两个都得列，缺一个 exe 报「模块未打包」
+  'lib/diag.js',
+  'build/zip.js',
   // 图库索引/搜索/重复文件：漏了它，exe 打开图库页会报「模块未打包」
   'lib/library.js',
   // 自然在线（账号相册）：漏了这两个，源码跑得好好的，打出来的 exe 会报「模块未打包」

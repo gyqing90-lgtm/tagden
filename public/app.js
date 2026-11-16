@@ -4613,6 +4613,39 @@ function bindAuthor() {
   const mask = $('authorMask');
   const close = () => mask.classList.remove('show');
   $('authorBtn').onclick = () => mask.classList.add('show');
+  /* 诊断包：把版本、日志、配置填写情况打成一个 zip。后端只写「有没有填」，
+     不含任何账号密码令牌，所以用户可以放心发出来。 */
+  if ($('diagBtn')) $('diagBtn').onclick = async () => {
+    const btn = $('diagBtn');
+    const out = $('diagOut');
+    const label = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '生成中…';
+    out.hidden = true;
+    try {
+      const r = await post('/api/diag/export', { path: S.dir || '' });
+      out.hidden = false;
+      out.innerHTML =
+        `<span>已生成 <b>${esc(r.name)}</b></span>` +
+        `<code class="diag-path" title="${esc(r.path)}">${esc(shortenPath(r.path))}</code>` +
+        '<button id="diagCopy" class="ghost mini" type="button">复制路径</button>' +
+        `<p class="muted">${kb(r.size)} · ${r.entries} 个条目 · 不含账号、密码、令牌，可直接发出</p>`;
+      $('diagCopy').onclick = async () => {
+        try {
+          await navigator.clipboard.writeText(r.path);
+          $('diagCopy').textContent = '已复制';
+        } catch {
+          $('diagCopy').textContent = '复制失败，手动选中';
+        }
+      };
+    } catch (err) {
+      out.hidden = false;
+      out.innerHTML = `<span class="bad">生成失败：${esc(err.message)}</span>`;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = label;
+    }
+  };
   $('authorClose').onclick = close;
   mask.addEventListener('click', (e) => {
     if (e.target === mask) close();
