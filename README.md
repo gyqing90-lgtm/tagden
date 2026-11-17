@@ -86,6 +86,7 @@ tagden/
 │   ├── assets.js      ★ 新写：静态文件统一入口（源码读磁盘 / exe 读内存）
 │   ├── env.js         三个目录的唯一裁决处（源码 / exe / mac 目录版）
 │   ├── http.js parse.js inat.js ppbc.js baidu.js ebird.js secure.js
+│   ├── seedkeys.js    ★ 已撤掉的内置 Key 指纹（启动时清一次用户机器上的残留）
 ├── public/            index.html / app.js / style.css（打包后内联进 exe）
 │                      colcn.bin = 名录索引（gzip，base64 内联进 exe）
 ├── tools/build-colcn.js  ★ 名录索引构建器（`--download` 自动抓当年分册）

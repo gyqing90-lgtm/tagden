@@ -35,6 +35,8 @@ const MODULES = [
   'lib/baidu.js',
   'lib/secure.js',
   'lib/seed.js',
+  // 已撤掉的内置 Key 指纹（启动时清一次用户机器上的残留）：漏了它，exe 会报「模块未打包」
+  'lib/seedkeys.js',
   'lib/exif.js',
   'lib/imgmeta.js',
   'lib/labelcache.js',

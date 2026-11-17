@@ -1,8 +1,10 @@
 # 账号与 API 申请全指引
 
-> 适用：**物种标注工坊 tagden v0.6.20** / **物种鉴定聚合台 v1.0.51**
+> 适用：**物种标注工坊 tagden v0.9.3** / **物种鉴定聚合台 v1.0.51**
 > 用途：接手人重新申请、轮换各站点账号与 API Key 时照着做。
-> **当前所有凭据已经加密内置在 `lib/seed.js`，普通用户不需要申请任何东西** —— 这份文档是给「要换账号 / 要自己重新开通」的维护者看的。
+> **除豆包、懂鸟外，其它凭据已加密内置在 `lib/seed.js`，普通用户不需要申请** —— 豆包和懂鸟按次计费，
+> 自 v0.9.3 起不再随程序分发，用户在「识别 Key」面板里填自己申请的 Key（地址见第 2.2 / 2.3 节）。
+> 这份文档是给「要换账号 / 要自己重新开通」的维护者看的。
 > 本文档**不含任何真实账号、密码、Key 的值**；申请到的值一律存进 `lib/seed.js`（加密）或本机 `data/config.json`，不要写进文档、日志、聊天记录。
 
 ---
@@ -17,9 +19,9 @@
 | 2 | iNaturalist | `inaturalist` | 账号 + 密码 | 免费 | 官网注册 + 邮箱验证 |
 | 3 | 自然在线 / 形色 | `xingse`（聚合台里叫「形色」） | 账号 + 密码 + 图形验证码 → token | 免费 | 官网注册，**验证码必须人眼看** |
 | 4 | Pl@ntNet | `plantnet` | API Key | 免费 500 次/天 | my.plantnet.org |
-| 5 | 豆包（火山方舟） | `doubao` | API Key + 模型 ID | 按量计费 ≈ 1 分/张 | 火山引擎控制台，需实名 |
+| 5 | 豆包（火山方舟） | `doubao` | API Key + 模型 ID | 按量计费 ≈ 1 分/张 | **用户自备**（v0.9.3 起不内置），火山引擎控制台，需实名 |
 | 6 | 快瞳 | `kuaitong` | accessKey + accessSecret | 有免费体验次数，之后按量 | AI 开放平台注册，国内模型需联系客服 |
-| 7 | 懂鸟 HHOLOVE | `dongniao` / `-mammal` / `-herp` | API Key | 送 50 次，之后按量 | ai.open.hhodata.com |
+| 7 | 懂鸟 HHOLOVE | `dongniao` / `-mammal` / `-herp` | API Key | 送 50 次，之后按量 | **用户自备**（v0.9.3 起不内置），ai.open.hhodata.com |
 | 8 | eBird | `ebird`（地区记录校验，不是识别） | API Key | **永久免费** | ebird.org/api/keygen |
 | 9 | 百度智能云 | `baidu-animal` / `baidu-plant` | API Key + Secret Key | 各有免费额度，超出按次 | 百度智能云，需实名 + 建应用 |
 | 10 | 阿里云 OSS | 发版用，不是识别站点 | RAM 子账号 AK | 存储/流量计费 | 阿里云 RAM 控制台 |

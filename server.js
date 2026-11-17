@@ -37,6 +37,8 @@ const IMG = require('./lib/imgmeta');
 const EX = require('./lib/exif');
 const secure = require('./lib/secure');
 const SEED_CIPHER = require('./lib/seed');
+// 曾经内嵌、现已撤掉的那几把第三方 Key：只留指纹，启动时清一次用户机器上残留的同值
+const SEEDKEYS = require('./lib/seedkeys');
 const LC = require('./lib/labelcache');
 const TAXO = require('./lib/taxonomy');
 // 本地物种名录（Chinese-Latin 的 backbone）：归档/统计解析分类时优先用它，不联网
@@ -275,6 +277,22 @@ if (!config.seedXingsePurged) {
   config.seedXingsePurged = true;
   persistConfig();
 }
+
+/* 豆包（火山方舟）和懂鸟（HHOLOVE）的 API Key 用的是作者个人额度，v0.9.3 起不再内嵌进种子
+   —— 谁拿到 exe 都能把 Key 提出来刷，额度有限且按次计费。
+   老版本已经把种子写进 config.json 的机器，这里按 SHA-256 指纹清一次（只留指纹不存原文）：
+   清完之后这两个识别源就是「未配置」，在「识别 Key」里填自己申请的 Key 才能用。
+   用户自己填过的值指纹不同，不会被误清；清过一次就打标记，以后不再动。 */
+if (!config.seedKeysPurged) {
+  const purgedSites = SEEDKEYS.purge(config.sites);
+  if (purgedSites.length) {
+    console.log(
+      `  [i] 已移除内置的 ${purgedSites.join(' / ')} Key：要用这两个识别源，请在「识别 Key」里填自己申请的`,
+    );
+  }
+  config.seedKeysPurged = true;
+  persistConfig();
+}
 // GBIF 面板的中文名补全 / 归纳用 DeepSeek。GBIF 自己的读取接口是公开的、不需要 Key，
 // 要 Key 的是这一步；跟站点账号一起加密落在 data/config.json，浏览器端只拿得到 hasApiKey。
 config.deepseek = { apiKey: '', model: 'deepseek-chat', ...(config.deepseek || {}) };
@@ -291,7 +309,7 @@ function persistConfig() {
   }
   configDirty = true;
   fs.mkdirSync(DATA, { recursive: true });
-  const payload = { port: config.port, sites: config.sites, sessions: config.sessions, ui: config.ui, deepseek: config.deepseek, seedXingsePurged: config.seedXingsePurged };
+  const payload = { port: config.port, sites: config.sites, sessions: config.sessions, ui: config.ui, deepseek: config.deepseek, seedXingsePurged: config.seedXingsePurged, seedKeysPurged: config.seedKeysPurged };
   const tmp = `${CFG_FILE}.tmp`;
   fs.writeFileSync(tmp, secure.seal(payload), 'utf8');
   fs.renameSync(tmp, CFG_FILE);
@@ -3369,6 +3387,51 @@ function serveImage(req, res, q) {
 
 /* ---------------- 路由 ---------------- */
 
+/**
+ * 保存某个识别源的 API Key（「识别 Key」面板用）。
+ *
+ * 之所以由用户在界面里填：豆包、懂鸟这些是按次计费的，作者不再把自己的额度随程序发出去。
+ * 只收 SITE_META 里声明过的字段，密文字段留空＝不修改（用户只换模型 ID 时不会把 Key 抹掉），
+ * body.clear 才清空。返回最新 state，前端据此重画开关和状态。
+ */
+function apiSaveSiteKey(body) {
+  const site = String((body && body.site) || '');
+  const m = SITE_META[site];
+  if (!m) return { ok: false, error: '没有这个识别源：' + (site || '（空）') };
+  if (m.auth !== 'key') return { ok: false, error: `${m.name || site} 不用 API Key` };
+
+  const acc = m.account || site;
+  const fields = m.fields || [];
+  const allowed = new Map(fields.map((f) => [f.key, f]));
+  const cur = { ...((config.sites && config.sites[acc]) || {}) };
+
+  if (body && body.clear) {
+    for (const f of fields) if (f.secret) cur[f.key] = '';
+    config.sites[acc] = cur;
+    persistConfig();
+    return { ok: true, cleared: true, state: apiState() };
+  }
+
+  const values = (body && body.values) || {};
+  let touched = 0;
+  for (const [k, raw] of Object.entries(values)) {
+    const f = allowed.get(k);
+    if (!f) continue;
+    // Key 里不该有空白（复制时常带换行/首尾空格），非密文字段保留单空格
+    const raw2 = String(raw == null ? '' : raw);
+    const val = (f.secret ? raw2.replace(/\s+/g, '') : raw2.replace(/\s+/g, ' ').trim()).slice(0, 2000);
+    if (!val && f.secret) continue; // 留空＝不改
+    if (val === String(cur[k] || '')) continue;
+    cur[k] = val;
+    touched++;
+  }
+  if (!touched) return { ok: false, error: '没有要保存的内容（密钥留空等于不修改）' };
+
+  config.sites[acc] = cur;
+  persistConfig();
+  return { ok: true, state: apiState() };
+}
+
 function apiState() {
   const src = presetSources(config.ui?.preset);
   return {
@@ -3387,7 +3450,37 @@ function apiState() {
     current: { preset: src.preset, sources: src.sources, requested: src.requested, available: src.available },
     siteMeta: Object.values(SITE_META)
       .filter((m) => !m.verify)
-      .map((m) => ({ key: m.key, name: m.name, group: m.group, auth: m.auth, ready: siteReady(m.key), note: m.note || '' })),
+      .map((m) => {
+        const acc = m.account || m.key;
+        const cur = (config.sites && (config.sites[acc] || config.sites[m.key])) || {};
+        return {
+          key: m.key,
+          name: m.name,
+          group: m.group,
+          auth: m.auth,
+          ready: siteReady(m.key),
+          note: m.note || '',
+          // 「识别 Key」面板要用：同一个 account 的几个站点共用一份凭据（懂鸟鸟/兽/两爬）
+          account: acc,
+          home: m.home || '',
+          apply: m.apply || m.home || '',
+          hint: m.hint || '',
+          fields: (m.fields || []).map((f) => ({
+            key: f.key,
+            label: f.label || f.key,
+            placeholder: f.placeholder || '',
+            secret: !!f.secret,
+            type: f.type || 'text',
+            options: (f.options || []).map((o) => ({ value: o.value, label: o.label || o.value })),
+            hint: f.hint || '',
+          })),
+          // 只回「填了没」，明文永不回传浏览器；非密文字段（模型 ID / 区系）回显当前值便于编辑
+          has: Object.fromEntries((m.fields || []).map((f) => [f.key, !!String(cur[f.key] || '').trim()])),
+          vals: Object.fromEntries(
+            (m.fields || []).filter((f) => !f.secret).map((f) => [f.key, String(cur[f.key] || '')]),
+          ),
+        };
+      }),
     ui: {
       // 用 src.preset（已经做过回落）而不是原始配置：老配置里存着 auto 的，这里要变植物
       preset: src.preset,
@@ -4169,6 +4262,11 @@ async function handleApi(req, res, pathname, q) {
   if (pathname === '/api/diag/export' && req.method === 'POST') {
     return sendJson(res, 200, await apiDiagExport(await readJson(req), req));
   }
+  // 识别站点的 API Key（豆包 / 懂鸟 / 快瞳 / 百度 / Pl@ntNet）：用户自己申请、自己填
+  if (pathname === '/api/site-key' && req.method === 'POST') {
+    return sendJson(res, 200, apiSaveSiteKey(await readJson(req)));
+  }
+
   if (pathname === '/api/config/import' && req.method === 'POST') {
     const b = await readJson(req);
     return sendJson(res, 200, importConfig(b.envelope, b.passphrase));
