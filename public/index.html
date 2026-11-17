@@ -29,6 +29,7 @@
       <button id="engineBtn" class="ghost mini" type="button" title="展开/收起识别源开关">识别源</button>
       <span id="engineChips" class="chips"></span>
     </div>
+    <button id="siteKeyBtn" class="ghost mini" title="豆包、懂鸟这类按次计费的识别源要你自己的 API Key：在这里填，或点上面灰着的那个站点">识别 Key</button>
     <button id="cfgMigrateBtn" class="ghost mini" title="导出/导入账号、API Key、界面设置（口令加密）">配置迁移</button>
     <button id="authorBtn" class="ghost mini" title="用着不顺手、想要个新功能，直接找作者">联系作者</button>
   </div>
@@ -652,6 +653,11 @@
     <p class="tip">用着不顺手、想要个新功能、或者觉得某个物种名不对，都可以直接找我。</p>
     <div class="qr"><img src="/author-qr.png" alt="作者微信二维码" width="260"></div>
     <p class="author-line">微信扫码添加 · 备注「物种标注工坊」</p>
+    <div class="diag-box">
+      <p class="tip">报错、闪退、识别不出来时，先导出诊断包再发我 —— 比截图有用得多。</p>
+      <button id="diagBtn" class="ghost mini">导出诊断包</button>
+      <p class="diag-out" id="diagOut" hidden></p>
+    </div>
     <div class="sheet-actions">
       <button id="authorClose" class="ghost">关闭</button>
     </div>
@@ -901,6 +907,17 @@
     </div>
     <div class="cfg-msg" id="cfgMigrateMsg"></div>
     <div class="sheet-actions"><button id="cfgClose" class="ghost">关闭</button></div>
+  </div>
+</div>
+
+<!-- 识别 Key：豆包 / 懂鸟 / 快瞳 / 百度 / Pl@ntNet 这些按次计费的站点，Key 由用户自己申请自己填 -->
+<div class="mask" id="siteKeyMask">
+  <div class="sheet sitekey">
+    <h3>识别 Key</h3>
+    <p class="tip">程序<b>不再内置任何人的 API Key</b>：豆包、懂鸟这些是按次计费的个人额度，随程序发出去等于把额度公开。
+      要用哪个站点，就到它官网申请一个自己的 Key 粘进来 —— 只加密存在本机，界面只显示「已配置」，换电脑带不走。</p>
+    <div class="sk-list" id="siteKeyList"></div>
+    <div class="sheet-actions"><button id="siteKeyClose" class="ghost">关闭</button></div>
   </div>
 </div>
 

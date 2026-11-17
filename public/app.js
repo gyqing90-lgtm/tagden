@@ -326,6 +326,7 @@ async function boot() {
   };
   bindRenameSegs();
   bindEngineChips();
+  bindSiteKey();
   bindAuthor();
   bindUpdate();
   bindAggSheet();
@@ -449,7 +450,13 @@ function renderChips() {
     const m = S.state.siteMeta.find((x) => x.key === a.key) || {};
     const name = m.name || a.key;
     if (!a.ready) {
-      return `<button class="chip na" data-site="${a.key}" disabled title="${esc(name)}：还没填账号或密钥，暂时问不了">${esc(name)}</button>`;
+      // 要 API Key 的站点（豆包 / 懂鸟…）不做成死按钮：点一下直接去填 Key，
+      // 否则用户只看到一片灰，不知道该去哪儿配。
+      const needKey = m.auth === 'key';
+      const tip = needKey
+        ? `${name}：还没填 API Key，点一下去填（自己的 Key，程序不自带）`
+        : `${name}：还没填账号或密钥，暂时问不了`;
+      return `<button class="chip na${needKey ? ' need' : ''}" data-site="${a.key}"${needKey ? ' data-needkey="1"' : ' disabled'} title="${esc(tip)}">${esc(name)}</button>`;
     }
     const isOn = on.has(a.key);
     const tip = `${name}${m.note ? '｜' + m.note : ''}｜点一下${isOn ? '关掉' : '打开'}`;
@@ -476,7 +483,9 @@ function bindEngineChips() {
   });
   $('engineChips').onclick = async (e) => {
     const b = e.target.closest('button.chip[data-site]');
-    if (!b || b.disabled) return;
+    if (!b) return;
+    if (b.dataset.needkey) return openSiteKey(b.dataset.site);
+    if (b.disabled) return;
     const cur = S.state.current;
     const picked = new Set(cur.requested || cur.sources || []);
     const key = b.dataset.site;
@@ -493,6 +502,165 @@ function bindEngineChips() {
       toast(`这次用 ${S.state.current.sources.length} 个模型识别`, 1500);
     } catch (err) {
       toast(err.message);
+    }
+  };
+}
+
+/* ---------------- 识别 Key（用户自己申请的 API Key） ----------------
+ *
+ * 豆包（火山方舟）、懂鸟（HHOLOVE）按次计费，程序不再内置作者的额度 ——
+ * 谁拿到安装包都能把 Key 拎出来刷，额度一两下就没了。
+ * 所以这两个站点默认是灰的：点灰着的那一条、或者顶栏「识别 Key」，就能到这里填自己的。
+ * 同一个 account 的多个站点共用一份凭据（懂鸟鸟/兽/两爬），面板里合成一行。
+ */
+
+const SITEKEY_NAMES = {
+  doubao: '豆包（火山方舟）',
+  dongniao: '懂鸟（鸟 / 兽 / 两爬共用一把 Key）',
+  kuaitong: '快瞳 AI（鸟类）',
+  'baidu-animal': '百度 动物识别',
+  'baidu-plant': '百度 植物识别',
+  plantnet: 'Pl@ntNet（植物）',
+};
+
+/** siteMeta 里 auth==='key' 的站点按 account 合并成一行 */
+function siteKeyItems() {
+  const meta = (S.state.siteMeta || []).filter((m) => m.auth === 'key');
+  const map = new Map();
+  for (const m of meta) {
+    const acc = m.account || m.key;
+    if (!map.has(acc)) map.set(acc, { acc, site: m.key, sites: [], m });
+    const it = map.get(acc);
+    it.sites.push(m.key);
+    // 提示取信息最全的那条：懂鸟只有「鸟」那条带 hint
+    if ((m.hint || '').length > (it.m.hint || '').length) it.m = m;
+  }
+  const order = Object.keys(SITEKEY_NAMES);
+  const rank = (k) => (order.indexOf(k) < 0 ? 99 : order.indexOf(k));
+  return [...map.values()].sort((a, b) => rank(a.acc) - rank(b.acc));
+}
+
+function siteKeyRowHtml(m, f) {
+  const cur = String((m.vals || {})[f.key] || '');
+  if (f.type === 'select' && (f.options || []).length) {
+    const opts = ['<option value="">默认</option>']
+      .concat(
+        f.options.map(
+          (o) => `<option value="${esc(o.value)}"${o.value === cur ? ' selected' : ''}>${esc(o.label)}</option>`,
+        ),
+      )
+      .join('');
+    return `<div class="sk-row"><label>${esc(f.label)}</label><select data-f="${esc(f.key)}">${opts}</select></div>`;
+  }
+  const ph = f.secret && (m.has || {})[f.key] ? '已配置（留空＝不修改）' : f.placeholder || '';
+  return `<div class="sk-row"><label>${esc(f.label)}</label><input type="${f.secret ? 'password' : 'text'}" data-f="${esc(
+    f.key,
+  )}" value="${f.secret ? '' : esc(cur)}" autocomplete="off" spellcheck="false" placeholder="${esc(ph)}"></div>`;
+}
+
+function renderSiteKeys(focus) {
+  const box = $('siteKeyList');
+  if (!box) return;
+  const items = siteKeyItems();
+  box.innerHTML = items.length
+    ? items
+        .map((it) => {
+          const m = it.m;
+          const ready = it.sites.some((k) => (S.state.siteMeta.find((x) => x.key === k) || {}).ready);
+          const label = SITEKEY_NAMES[it.acc] || m.name || it.acc;
+          const apply = m.apply || m.home || '';
+          const rows = (m.fields || []).map((f) => siteKeyRowHtml(m, f)).join('');
+          return `<section class="sk-item${ready ? ' on' : ''}" data-site="${esc(it.site)}">
+      <header class="sk-head"><b>${esc(label)}</b><span class="sk-badge${ready ? ' on' : ''}">${
+            ready ? '已配置' : '未配置'
+          }</span>${
+            apply
+              ? `<a class="sk-apply" href="${esc(apply)}" target="_blank" rel="noopener">去申请 ↗</a>`
+              : ''
+          }</header>
+      <p class="sk-hint">${esc(m.hint || m.note || '')}</p>
+      ${rows}
+      <div class="sk-foot"><span class="sk-msg"></span>
+        <button class="ghost mini" data-act="clear"${ready ? '' : ' disabled'} title="清掉已保存的 Key">清除</button>
+        <button class="primary mini" data-act="save">保存</button>
+      </div>
+    </section>`;
+        })
+        .join('')
+    : '<div class="sk-empty">当前没有需要自己填 Key 的识别源。</div>';
+
+  if (focus) {
+    const it = items.find((x) => x.acc === focus || x.sites.includes(focus));
+    const card = it && box.querySelector(`.sk-item[data-site="${it.site}"]`);
+    if (card) {
+      card.scrollIntoView({ block: 'nearest' });
+      const inp = card.querySelector('input');
+      if (inp) inp.focus({ preventScroll: true });
+    }
+  }
+}
+
+function openSiteKey(site) {
+  renderSiteKeys(site || '');
+  const mask = $('siteKeyMask');
+  if (mask) mask.classList.add('show');
+}
+
+/** 卡片里那条提示：保存/清除的结果就写在卡片自己身上，别拿 toast 盖住面板 */
+function siteKeyMsg(card, text, cls) {
+  const el = card && card.querySelector('.sk-msg');
+  if (!el) return;
+  el.textContent = text || '';
+  el.className = `sk-msg${cls ? ' ' + cls : ''}`;
+}
+
+function bindSiteKey() {
+  const mask = $('siteKeyMask');
+  if (!mask) return;
+  const close = () => mask.classList.remove('show');
+  if ($('siteKeyBtn')) $('siteKeyBtn').onclick = () => openSiteKey('');
+  if ($('siteKeyClose')) $('siteKeyClose').onclick = close;
+  mask.onclick = (e) => {
+    if (e.target === mask) close();
+  };
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && mask.classList.contains('show')) close();
+  });
+
+  $('siteKeyList').onclick = async (e) => {
+    const btn = e.target.closest('button[data-act]');
+    if (!btn || btn.disabled) return;
+    const card = btn.closest('.sk-item');
+    const site = card && card.dataset.site;
+    if (!site) return;
+    const act = btn.dataset.act;
+    btn.disabled = true;
+    try {
+      if (act === 'clear') {
+        if (!window.confirm('清掉这一项已保存的 Key？清完这个站点就用不了了，要用得重新填。')) {
+          btn.disabled = false;
+          return;
+        }
+        const r = await post('/api/site-key', { site, clear: true });
+        S.state = r.state;
+        renderChips();
+        renderSiteKeys(site);
+        siteKeyMsg($('siteKeyList').querySelector(`.sk-item[data-site="${site}"]`), '已清除', 'ok');
+        return;
+      }
+      const values = {};
+      card.querySelectorAll('[data-f]').forEach((el) => {
+        values[el.dataset.f] = el.value;
+      });
+      const r = await post('/api/site-key', { site, values });
+      S.state = r.state;
+      renderChips();
+      renderSiteKeys(site);
+      siteKeyMsg($('siteKeyList').querySelector(`.sk-item[data-site="${site}"]`), '已保存，去上面的开关里打开它', 'ok');
+    } catch (err) {
+      siteKeyMsg(card, err.message, 'err');
+    } finally {
+      btn.disabled = false;
     }
   };
 }
@@ -4613,6 +4781,39 @@ function bindAuthor() {
   const mask = $('authorMask');
   const close = () => mask.classList.remove('show');
   $('authorBtn').onclick = () => mask.classList.add('show');
+  /* 诊断包：把版本、日志、配置填写情况打成一个 zip。后端只写「有没有填」，
+     不含任何账号密码令牌，所以用户可以放心发出来。 */
+  if ($('diagBtn')) $('diagBtn').onclick = async () => {
+    const btn = $('diagBtn');
+    const out = $('diagOut');
+    const label = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '生成中…';
+    out.hidden = true;
+    try {
+      const r = await post('/api/diag/export', { path: S.dir || '' });
+      out.hidden = false;
+      out.innerHTML =
+        `<span>已生成 <b>${esc(r.name)}</b></span>` +
+        `<code class="diag-path" title="${esc(r.path)}">${esc(shortenPath(r.path))}</code>` +
+        '<button id="diagCopy" class="ghost mini" type="button">复制路径</button>' +
+        `<p class="muted">${kb(r.size)} · ${r.entries} 个条目 · 不含账号、密码、令牌，可直接发出</p>`;
+      $('diagCopy').onclick = async () => {
+        try {
+          await navigator.clipboard.writeText(r.path);
+          $('diagCopy').textContent = '已复制';
+        } catch {
+          $('diagCopy').textContent = '复制失败，手动选中';
+        }
+      };
+    } catch (err) {
+      out.hidden = false;
+      out.innerHTML = `<span class="bad">生成失败：${esc(err.message)}</span>`;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = label;
+    }
+  };
   $('authorClose').onclick = close;
   mask.addEventListener('click', (e) => {
     if (e.target === mask) close();
