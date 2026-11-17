@@ -101,6 +101,7 @@
           <summary class="ghost mini">更多</summary>
           <div class="more-menu">
             <button id="exportBtn" class="ghost" title="导出带拍摄时间和经纬度的标注明细、物种清单">导出清单</button>
+            <button id="dwcBtn" class="ghost" title="Darwin Core 标准格式：occurrence.txt + taxon.txt + meta.xml，打成 zip 可直接导进 GBIF 或交给合作单位">Darwin Core</button>
             <button id="toScoreBtn" class="ghost" title="给当前这个文件夹的照片打技术分，按星级挑片，可再送去标注或传到自然在线">照片评分</button>
             <button id="nameCheckBtn" class="ghost" title="只有中文名或只有学名的照片，用内置《中国生物物种名录》把另一侧补齐；确认后才写回">物种名核对</button>
             <button id="pasteBtn" class="ghost" title="不用打开文件夹：Ctrl+V 粘贴一张图、或直接拖进来，立刻看多站识别结果">粘贴单图识别</button>
@@ -145,6 +146,12 @@
           选一个文件夹开始统计<span class="muted">　统计范围含它的所有子文件夹；只读，不改任何文件</span>
         </div>
         <div class="grid" id="statsGrid"></div>
+        <!-- 多目录汇总：勾右上角的＋，把「2025 全年 + 2026 上半年」合起来算 -->
+        <div class="st-pick-bar" id="stPickBar" hidden>
+          <span>已选 <b id="stPickN">0</b> 个文件夹</span>
+          <button id="stPickClear" class="ghost mini" type="button">清空</button>
+          <button id="stPickRun" class="primary mini" type="button">汇总统计</button>
+        </div>
         <div class="empty" id="statsEmpty" hidden></div>
       </div>
       <div class="st-body" id="statsBody" hidden></div>

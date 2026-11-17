@@ -50,10 +50,14 @@ const STATS = require('./lib/stats');
 const STATS_CACHE = require('./lib/stats-cache');
 // 名录 → RTF（Word 直接打开，拉丁名斜体），导出调查报告附录用
 const RTF = require('./lib/species-rtf');
+// Darwin Core：occurrence.txt + taxon.txt + meta.xml，可直接导进 GBIF / 交给合作单位
+const DWC = require('./lib/dwc');
 // 诊断包：出问题时一键收集版本/日志/配置填写情况（凭据只报「有没有填」）
 const DIAG = require('./lib/diag');
 const { createZip } = require('./build/zip');
 const LIB = require('./lib/library');
+// RAW：不解像素，只掏相机内嵌的 JPEG 预览（缩略图 / 预览 / 识别 / 评分都用它）
+const RAW = require('./lib/raw');
 const REGIONS = require('./lib/regions');
 const ASSETS = require('./lib/assets');
 // 自然在线（账号相册）—— 复用 nature-client 项目里那套模块，本文件只管路由和任务
@@ -133,11 +137,21 @@ SCORE.init({ dataDir: DATA, cacheDir: CACHE });
 LLAMA.init({ cacheDir: CACHE });
 IDC.init({ dir: path.join(CACHE, 'identify') });
 LIB.init({ cacheDir: CACHE });
+RAW.init({ cacheDir: CACHE });
+// RAW 预览缓存会随改图不断新增（键里带 mtime），启动时清掉 30 天没动过的
+try {
+  const n = RAW.prune(30);
+  if (n) console.log(`  [i] 清理 ${n} 个过期的 RAW 预览缓存`);
+} catch {}
 try {
   fs.mkdirSync(THUMBS, { recursive: true });
 } catch {}
 
-const IMAGE_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp', '.heic', '.tif', '.tiff', '.bmp', '.gif']);
+// 缩略图/预览/识别都走「内嵌 JPEG 预览」这条路，所以 RAW 可以和普通图片平起平坐（见 lib/raw.js）
+const IMAGE_EXT = new Set([
+  '.jpg', '.jpeg', '.png', '.webp', '.heic', '.tif', '.tiff', '.bmp', '.gif',
+  ...RAW.RAW_EXT,
+]);
 // 统计进度：前端在请求返回前轮询它，把「已扫 1234 张」显示出来。
 // 只记一个当前任务 —— 统计是一次一个，不需要队列。
 const STAT_PROGRESS = { active: false, dir: '', phase: '', done: 0, total: 0, startedAt: 0 };
@@ -1650,6 +1664,11 @@ async function apiUndoLast() {
 
 async function apiWrite(body) {
   const file = asImage(body.path);
+  // RAW 是只读底片：往里写 XMP 会破坏厂商私有结构，当前只支持看图/识别/评分。
+  // 要标注就先导出成 JPEG（或等 .xmp sidecar 支持）。
+  if (RAW.isRaw(file)) {
+    throw bad('RAW 只支持看图、识别和评分；要标注请先导出 JPEG，或把标注结果导成物种清单');
+  }
   // 用户正在浏览的这个文件夹：CSV 永远写在这里，文件被归档进子目录也不跟着跑
   const rootDir = path.dirname(file);
   const cn = String(body.cn || '').trim();
@@ -2073,6 +2092,53 @@ function writeCsv(file, header, rows) {
   return file;
 }
 
+/** 按物种汇总：一个物种一行，带第一个坐标点、时间范围和归档文件夹 */
+function aggregateSpecies(rows) {
+  const map = new Map();
+  for (const r of rows) {
+    const key = `${r.cn}||${r.latin}`;
+    let s = map.get(key);
+    if (!s) {
+      s = { cn: r.cn, latin: r.latin, n: 0, gps: [], times: [], folders: new Set() };
+      map.set(key, s);
+    }
+    s.n += 1;
+    if (r.lat != null && r.lon != null) s.gps.push([r.lat, r.lon, r.alt]);
+    if (r.taken) s.times.push(r.taken);
+    if (r.folder) s.folders.add(r.folder);
+  }
+  return [...map.values()].sort((a, b) => b.n - a.n || String(a.cn).localeCompare(String(b.cn), 'zh'));
+}
+
+/**
+ * 给每个物种补分类阶元（界门纲目科属）：本地名录优先，命中是微秒级；本地没有才联网。
+ * 断网时不阻塞导出 —— 查不到就整列留空，名录照样能用，只是少几列。
+ * CSV / RTF / Darwin Core 三处导出共用这一份，口径必须一致。
+ */
+async function resolveSpeciesTaxo(species) {
+  let taxoMap = new Map();
+  try {
+    taxoMap = await TAXO.resolve(species.map((s) => ({ latin: s.latin, cn: s.cn })));
+  } catch (e) {
+    logLine('warn', `导出时分类解析失败，名录将缺目/科/属：${e && e.message}`);
+  }
+  const rankOf = (s, rank) => {
+    const key = s.latin ? s.latin.toLowerCase() : `cn:${String(s.cn || '').toLowerCase()}`;
+    const rec = taxoMap.get(key);
+    const r = (rec && rec.ranks && rec.ranks[rank]) || {};
+    return { latin: r.latin || '', cn: r.cn || '' };
+  };
+  for (const s of species) {
+    s.kingdom = rankOf(s, 'kingdom');
+    s.phylum = rankOf(s, 'phylum');
+    s.class = rankOf(s, 'class');
+    s.order = rankOf(s, 'order');
+    s.family = rankOf(s, 'family');
+    s.genus = rankOf(s, 'genus');
+  }
+  return species;
+}
+
 async function apiExport(body) {
   const dir = asDir(body.path);
   const rows = scanLabeled(dir);
@@ -2096,41 +2162,8 @@ async function apiExport(body) {
     ]),
   );
 
-  // 按物种汇总：一个物种一行，给的是第一个有坐标的点 + 坐标点数
-  const map = new Map();
-  for (const r of rows) {
-    const key = `${r.cn}||${r.latin}`;
-    let s = map.get(key);
-    if (!s) {
-      s = { cn: r.cn, latin: r.latin, n: 0, gps: [], times: [], folders: new Set() };
-      map.set(key, s);
-    }
-    s.n += 1;
-    if (r.lat != null && r.lon != null) s.gps.push([r.lat, r.lon, r.alt]);
-    if (r.taken) s.times.push(r.taken);
-    if (r.folder) s.folders.add(r.folder);
-  }
-  const species = [...map.values()].sort((a, b) => b.n - a.n || String(a.cn).localeCompare(String(b.cn), 'zh'));
-
-  /* 分类阶元（目/科/属）：本地名录优先，命中是微秒级；本地没有才联网。
-     断网时不阻塞导出 —— 查不到就整列留空，名录照样能用，只是少几列。 */
-  let taxoMap = new Map();
-  try {
-    taxoMap = await TAXO.resolve(species.map((s) => ({ latin: s.latin, cn: s.cn })));
-  } catch (e) {
-    logLine('warn', `导出时分类解析失败，名录将缺目/科/属：${e && e.message}`);
-  }
-  const rankOf = (s, rank) => {
-    const key = s.latin ? s.latin.toLowerCase() : `cn:${String(s.cn || '').toLowerCase()}`;
-    const rec = taxoMap.get(key);
-    const r = (rec && rec.ranks && rec.ranks[rank]) || {};
-    return { latin: r.latin || '', cn: r.cn || '' };
-  };
-  for (const s of species) {
-    s.order = rankOf(s, 'order');
-    s.family = rankOf(s, 'family');
-    s.genus = rankOf(s, 'genus');
-  }
+  const species = aggregateSpecies(rows);
+  await resolveSpeciesTaxo(species);
 
   const speciesFile = writeCsv(
     path.join(dir, '物种清单_带坐标.csv'),
@@ -2190,6 +2223,49 @@ async function apiExport(body) {
     species: species.length,
     withGps: rows.filter((r) => r.lat != null && r.lon != null).length,
     withTaxo,
+  };
+}
+
+/**
+ * Darwin Core 导出：给 GBIF / iNaturalist / 合作单位的标准格式。
+ *
+ * 和「导出清单」用同一份明细（scanLabeled）和同一套分类解析，所以数字对得上；
+ * 区别只是列名换成 dwc 术语，并打成 Darwin Core Archive（zip）。
+ */
+async function apiExportDwc(body) {
+  const dir = asDir(body.path);
+  const rows = scanLabeled(dir);
+  if (!rows.length) throw bad('这个文件夹里还没有已标注的图片');
+
+  const species = await resolveSpeciesTaxo(aggregateSpecies(rows));
+  const out = DWC.build(rows, species);
+
+  // 文本单独留一份（方便直接看/改），同时打包成 zip 交给 IPT
+  const sub = path.join(dir, 'DarwinCore');
+  fs.mkdirSync(sub, { recursive: true });
+  fs.writeFileSync(path.join(sub, 'occurrence.txt'), out.occurrence, 'utf8');
+  fs.writeFileSync(path.join(sub, 'taxon.txt'), out.taxon, 'utf8');
+  fs.writeFileSync(path.join(sub, 'meta.xml'), out.meta, 'utf8');
+  fs.writeFileSync(path.join(sub, 'README.txt'), out.readme, 'utf8');
+
+  const zipPath = path.join(dir, 'DarwinCore_物种记录.zip');
+  fs.writeFileSync(
+    zipPath,
+    createZip([
+      { name: 'occurrence.txt', data: out.occurrence },
+      { name: 'taxon.txt', data: out.taxon },
+      { name: 'meta.xml', data: out.meta },
+      { name: 'README.txt', data: out.readme },
+    ]),
+  );
+
+  return {
+    ok: true,
+    zip: zipPath,
+    dir: sub,
+    files: [zipPath],
+    names: [path.basename(zipPath)],
+    ...out.counts,
   };
 }
 
@@ -3356,6 +3432,19 @@ function serveImage(req, res, q) {
         }
       }
     }
+    // RAW 没有 APP1 EXIF 可抽，直接用相机嵌的那张小预览（机背回看图，几 KB～几十 KB）
+    if (!buf && RAW.isRaw(full)) {
+      try {
+        buf = RAW.jpeg(full, 'small');
+      } catch {
+        buf = null;
+      }
+      if (buf) {
+        try {
+          fs.writeFileSync(cacheFile, buf);
+        } catch {}
+      }
+    }
     if (buf) {
       if (req.headers['if-none-match'] === tag) {
         res.writeHead(304, { etag: tag, 'cache-control': 'private, max-age=604800, immutable' }).end();
@@ -3371,6 +3460,37 @@ function serveImage(req, res, q) {
       res.end(buf);
       return;
     }
+  }
+
+  // RAW 一律送内嵌的全尺寸 JPEG 预览：浏览器解不了 CR2/NEF，但解 JPEG 没问题，
+  // 于是「大图预览、识别前压图、评分」这三条链路都不用改代码。
+  if (RAW.isRaw(full)) {
+    let j = null;
+    try {
+      j = RAW.jpeg(full, 'big');
+    } catch {
+      j = null;
+    }
+    if (j) {
+      const rawTag = `"r${st.size}-${Math.round(st.mtimeMs)}"`;
+      if (req.headers['if-none-match'] === rawTag) {
+        res.writeHead(304, { etag: rawTag }).end();
+        return;
+      }
+      res.writeHead(200, {
+        'content-type': 'image/jpeg',
+        'content-length': j.length,
+        'cache-control': 'private, max-age=604800',
+        etag: rawTag,
+        'x-raw-preview': '1',
+      });
+      res.end(j);
+      return;
+    }
+    res
+      .writeHead(415, { 'content-type': 'text/plain; charset=utf-8' })
+      .end('这张 RAW 里没有内嵌 JPEG 预览，暂时看不了');
+    return;
   }
 
   const etag = `"${st.size}-${Math.round(st.mtimeMs)}"`;
@@ -3575,16 +3695,42 @@ async function walkStats(dir, root, out) {
   }
 }
 
-async function analyzeStats(dir) {
-  const root = path.resolve(dir);
+/**
+ * 统计。可以传一个目录，也可以传一组（「2025 全年 + 2026 上半年」合起来算区系）：
+ *   analyzeStats('/a')
+ *   analyzeStats(['/a', '/b'])
+ * 多目录时每张图记下它属于哪个根，排行榜/文件夹维度会用「根名 / 子路径」区分，
+ * 其余口径（时间线、热力图、地区、器材）本来就是跨目录合并着算的。
+ */
+async function analyzeStats(input) {
+  const roots = (Array.isArray(input) ? input : [input])
+    .map((d) => String(d || '').trim())
+    .filter(Boolean)
+    .map((d) => path.resolve(d));
+  if (!roots.length) throw bad('缺少要统计的目录');
+  const multi = roots.length > 1;
   STAT_PROGRESS.active = true;
-  STAT_PROGRESS.dir = root;
+  STAT_PROGRESS.dir = roots[0];
   STAT_PROGRESS.phase = 'walk';
   STAT_PROGRESS.done = 0;
   STAT_PROGRESS.total = 0;
   STAT_PROGRESS.startedAt = Date.now();
   const files = [];
-  await walkStats(root, root, files);
+  for (const root of roots) {
+    const part = [];
+    await walkStats(root, root, part);
+    const rootName = path.basename(root) || root;
+    for (const f of part) files.push({ ...f, root, rootName });
+  }
+  // 勾选的目录可能是「父子关系」（比如同时勾了 2025 和 2025/春季）：
+  // 按绝对路径去重，一张图只算一次，否则总数和物种数都会翻倍。
+  if (files.length) {
+    const uniq = new Map();
+    for (const f of files) if (!uniq.has(f.full)) uniq.set(f.full, f);
+    files.length = 0;
+    files.push(...uniq.values());
+  }
+  const root = roots[0];
   // 张数不设上限：让用户看到的就是这个文件夹真实有多少张
   STAT_PROGRESS.phase = 'read';
   STAT_PROGRESS.done = 0;
@@ -3593,7 +3739,12 @@ async function analyzeStats(dir) {
   // 1) 并发读标签 + EXIF：同一次读头把 XMP 和拍摄时间/GPS 一起拿回来。
   //    以前是串行 await，5000 张能拖到几十分钟；这里 8 路并发，且不再为 EXIF 二次开文件。
   //    先查快照：size + mtime 都没变就直接复用上次读出的结果（图库索引同一思路）。
-  const sCache = STATS_CACHE.open(CACHE, root);
+  // 多目录各开一个快照句柄（每个根一套 rel→条目），落盘仍是同一个 JSON
+  const caches = new Map();
+  const cacheFor = (r) => {
+    if (!caches.has(r)) caches.set(r, STATS_CACHE.open(CACHE, r));
+    return caches.get(r);
+  };
   const STAT_CONC = 8;
   let readDone = 0;
   const items = await mapLimit(files, STAT_CONC, async (f) => {
@@ -3603,6 +3754,7 @@ async function analyzeStats(dir) {
     } catch {
       st = null;
     }
+    const sCache = cacheFor(f.root);
     const hit = st ? sCache.get(f.rel, st) : null;
     if (hit) {
       readDone += 1;
@@ -3610,9 +3762,17 @@ async function analyzeStats(dir) {
       return { f, cn: hit.cn, latin: hit.latin, ex: { ...EX.EMPTY, ...hit.ex }, taken: hit.taken, takenSrc: hit.takenSrc };
     }
     let label = null;
-    try {
-      label = await IMG.readLabelFastAsync(f.full, { withMeta: true });
-    } catch {}
+    if (RAW.isRaw(f.full)) {
+      // RAW 没有 APP1，EX.readLabel 读不到；改解析内嵌预览图的 EXIF（拍摄时间、GPS、机身都在）
+      try {
+        const r = RAW.exifOf(f.full, EX);
+        if (r) label = { meta: { ...EX.EMPTY, ...r }, title: '', description: '', keywords: [] };
+      } catch {}
+    } else {
+      try {
+        label = await IMG.readLabelFastAsync(f.full, { withMeta: true });
+      } catch {}
+    }
     let { cn, latin } = splitNameFields(label || {});
     // 没写标签的图，名字往往就在文件名上（验收照片十有八九如此）。
     // 不回退读文件名的话，这些「文件名里有拉丁名」的图会被全算成未鉴定。
@@ -3647,12 +3807,21 @@ async function analyzeStats(dir) {
     sCache.put(f.rel, st, item);
     return item;
   });
-  const sCacheSaved = sCache.save();
-  const sCacheInfo = sCache.status();
-  if (sCacheInfo.hits) {
+  let cacheHits = 0;
+  let cacheMisses = 0;
+  let cacheOk = true;
+  for (const [r, c] of caches) {
+    const saved = c.save();
+    if (!saved.ok) cacheOk = false;
+    const st = c.status();
+    cacheHits += st.hits;
+    cacheMisses += st.misses;
+    void r;
+  }
+  if (cacheHits) {
     console.log(
-      `  [i] 统计快照：${files.length} 张里 ${sCacheInfo.hits} 张直接复用（未变），${sCacheInfo.misses} 张重新读取${
-        sCacheSaved.ok ? '' : '；快照未写入'
+      `  [i] 统计快照：${files.length} 张里 ${cacheHits} 张直接复用（未变），${cacheMisses} 张重新读取${
+        cacheOk ? '' : '；快照未写入'
       }`,
     );
   }
@@ -3705,8 +3874,13 @@ async function analyzeStats(dir) {
       body,
       taken: it.taken,
       regionLabel: region,
-      project: it.f.top || '根目录',
-      folder: it.f.folder,
+      project: multi
+        ? `${it.f.rootName}${it.f.top ? ' / ' + it.f.top : ''}`
+        : it.f.top || '根目录',
+      // 多目录汇总时，两个根的「2026」子文件夹会撞名，所以带上根名
+      folder: multi
+        ? `${it.f.rootName}${it.f.folder && it.f.folder !== '根目录' ? ' / ' + it.f.folder : ''}`
+        : it.f.folder,
       stem: it.f.stem,
       path: it.f.full,
     });
@@ -3727,8 +3901,10 @@ async function analyzeStats(dir) {
     path: root,
     total: records.length,
     truncated: false,
+    // 汇总了哪几个目录（单目录时就是那一个）
+    roots,
     // 有多少张是走快照复用的：前端可以据此显示「比上次快在哪」
-    cache: { hits: sCacheInfo.hits, misses: sCacheInfo.misses },
+    cache: { hits: cacheHits, misses: cacheMisses },
     level,
     dimensions: STATS.DIMENSIONS.map(([dim, label]) => ({ dim, label, data: dims[dim] })),
     tree,
@@ -3879,14 +4055,29 @@ async function handleLibrary(req, res, pathname, q) {
 }
 
 async function apiStats(q) {
-  let dir;
+  // 单目录：?path=…
+  // 多目录汇总：?paths=["/a","/b"]（URL 编码的 JSON 数组）
+  let dirs;
   try {
-    dir = asDir(q.get('path'));
+    const multi = q.get('paths');
+    if (multi) {
+      let arr = null;
+      try {
+        arr = JSON.parse(multi);
+      } catch {
+        return { ok: false, error: '目录列表格式不对（应为 JSON 数组）' };
+      }
+      if (!Array.isArray(arr)) arr = [arr];
+      dirs = arr.filter((d) => typeof d === 'string' && d.trim()).map((d) => asDir(d));
+      if (!dirs.length) return { ok: false, error: '没有可统计的目录' };
+    } else {
+      dirs = [asDir(q.get('path'))];
+    }
   } catch (err) {
     return { ok: false, error: err.message };
   }
   try {
-    return await analyzeStats(dir);
+    return await analyzeStats(dirs.length === 1 ? dirs[0] : dirs);
   } catch (err) {
     return { ok: false, error: String(err && err.message ? err.message : err) };
   } finally {
@@ -4256,10 +4447,26 @@ async function handleApi(req, res, pathname, q) {
     const raw = String(body.dataJpeg || '');
     const b64 = raw.replace(/^data:image\/[^;]+;base64,/, '');
     if (!b64) throw bad('没有图片数据');
-    const jpeg = Buffer.from(b64, 'base64');
+    let jpeg = Buffer.from(b64, 'base64');
     const smallRaw = String(body.dataSmall || '').replace(/^data:image\/[^;]+;base64,/, '');
     const small = smallRaw ? Buffer.from(smallRaw, 'base64') : null;
     const name = String(body.name || '').trim() || '粘贴图片.jpg';
+    // 拖进来的 RAW：浏览器解不开，传上来的是原始底片。落地成临时文件掏内嵌预览，
+    // 再走和粘贴 JPEG 完全一样的识别路径。
+    if (RAW.isRaw(name) && !(jpeg[0] === 0xff && jpeg[1] === 0xd8)) {
+      const tmp = path.join(os.tmpdir(), `tagden-raw-${process.pid}-${Date.now()}${path.extname(name).toLowerCase()}`);
+      try {
+        fs.writeFileSync(tmp, jpeg);
+        const pv = RAW.jpeg(tmp, 'big');
+        if (pv) jpeg = pv;
+      } catch {
+        /* 抽不出预览就按原样送，让站点自己报错 */
+      } finally {
+        try {
+          fs.unlinkSync(tmp);
+        } catch {}
+      }
+    }
     const out = await identifyImage({
       buffer: jpeg,
       mime: 'image/jpeg',
@@ -4301,6 +4508,9 @@ async function handleApi(req, res, pathname, q) {
     return sendJson(res, 200, importConfig(b.envelope, b.passphrase));
   }
 
+  if (pathname === '/api/export/dwc' && req.method === 'POST') {
+    return sendJson(res, 200, await apiExportDwc(await readJson(req)));
+  }
   if (pathname === '/api/export' && req.method === 'POST') {
     return sendJson(res, 200, await apiExport(await readJson(req)));
   }

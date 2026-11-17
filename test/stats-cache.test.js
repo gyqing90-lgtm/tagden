@@ -166,7 +166,9 @@ test('文件夹换得多时只保留最近 6 个根', () => {
 test('server 真正用上了快照（回归：别只在测试里存在）', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   assert.match(src, /require\('\.\/lib\/stats-cache'\)/);
-  assert.match(src, /STATS_CACHE\.open\(CACHE, root\)/);
+  // 多目录汇总后改成「每个根一个句柄」，单目录也走同一个入口
+  assert.match(src, /const cacheFor = \(r\) => \{/);
+  assert.match(src, /STATS_CACHE\.open\(CACHE, r\)/);
   assert.match(src, /sCache\.put\(f\.rel, st, item\)/);
   // 走快照时不能再读文件：命中分支必须落在 readLabelFastAsync 之前
   const start = src.indexOf('const hit = st ? sCache.get');
@@ -180,4 +182,39 @@ test('server 真正用上了快照（回归：别只在测试里存在）', () =
 test('打包清单里有 stats-cache（漏了 exe 会报模块未打包）', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'build', 'bundle.js'), 'utf8');
   assert.match(src, /'lib\/stats-cache\.js'/);
+});
+
+test('多目录汇总：同时开两个根的句柄，互不干扰且都能落盘', () => {
+  const dir = tmp('sc');
+  const cache = path.join(dir, 'cache');
+  const r1 = path.join(dir, 'A');
+  const r2 = path.join(dir, 'B');
+  for (const r of [r1, r2]) fs.mkdirSync(r, { recursive: true });
+  fs.writeFileSync(path.join(r1, 'x.jpg'), 'xxxx');
+  fs.writeFileSync(path.join(r2, 'x.jpg'), 'yyyy');
+  const s1 = fs.statSync(path.join(r1, 'x.jpg'));
+  const s2 = fs.statSync(path.join(r2, 'x.jpg'));
+
+  const SC = fresh();
+  // 两个句柄同时开着（合并统计就是这种用法）
+  const c1 = SC.open(cache, r1);
+  const c2 = SC.open(cache, r2);
+  c1.put('x.jpg', s1, item('A 的'));
+  c2.put('x.jpg', s2, item('B 的'));
+  assert.equal(c1.get('x.jpg', s1).cn, 'A 的');
+  assert.equal(c2.get('x.jpg', s2).cn, 'B 的');
+  assert.equal(c1.save().ok, true);
+  assert.equal(c2.save().ok, true);
+
+  const raw = JSON.parse(fs.readFileSync(path.join(cache, 'stats-cache.json'), 'utf8'));
+  assert.equal(raw.roots[r1].files['x.jpg'][2], 'A 的');
+  assert.equal(raw.roots[r2].files['x.jpg'][2], 'B 的');
+});
+
+test('server 支持多目录：paths 参数与逐根句柄', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(src, /q\.get\('paths'\)/);
+  assert.match(src, /JSON\.parse\(multi\)/);
+  assert.match(src, /for \(const root of roots\)/);
+  assert.match(src, /path\.basename\(root\)/);
 });

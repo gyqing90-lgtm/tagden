@@ -88,6 +88,8 @@ tagden/
 │   ├── http.js parse.js inat.js ppbc.js baidu.js ebird.js secure.js
 │   ├── seedkeys.js    ★ 已撤掉的内置 Key 指纹（启动时清一次用户机器上的残留）
 │   ├── stats-cache.js  ★ 统计快照（size+mtime 命中就不重读，和 library 索引一个思路）
+│   ├── raw.js         ★ RAW 取内嵌 JPEG 预览（.nef/.cr2/.arw/.dng…，缩略图/识别/评分都用）
+│   ├── dwc.js         ★ Darwin Core 导出（occurrence.txt / taxon.txt / meta.xml）
 ├── public/            index.html / app.js / style.css（打包后内联进 exe）
 │                      colcn.bin = 名录索引（gzip，base64 内联进 exe）
 ├── tools/build-colcn.js  ★ 名录索引构建器（`--download` 自动抓当年分册）

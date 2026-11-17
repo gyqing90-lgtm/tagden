@@ -4,6 +4,14 @@
 const $ = (id) => document.getElementById(id);
 const enc = encodeURIComponent;
 
+/* ---------------- 哪些文件算「图」 ----------------
+ * RAW 也算：服务端会把相机内嵌的 JPEG 预览掏出来（/img 直接回 JPEG），
+ * 所以缩略图、预览、识别、评分这些链路对 .nef/.cr2/.arw/.dng 一视同仁。
+ */
+const RAW_EXT_RE = /\.(cr2|cr3|crw|nef|nrw|arw|srf|sr2|dng|raf|orf|rw2|raw|pef|srw|3fr|fff|iiq|mos)$/i;
+const IMG_EXT_RE = /\.(jpe?g|png|webp|bmp|gif|tiff?|heic|avif)$/i;
+const isImageName = (n) => IMG_EXT_RE.test(String(n || '')) || RAW_EXT_RE.test(String(n || ''));
+
 /* ---------------- 翻页参数 ----------------
  * 必须在 S 之前声明：S.pageSize 初始化时就要读它们（const 有 TDZ，放到后面会炸）。
  */
@@ -2221,6 +2229,7 @@ function bindToolbar() {
     updateCount();
   };
   $('exportBtn').onclick = doExport;
+  if ($('dwcBtn')) $('dwcBtn').onclick = doExportDwc;
   $('runBtn').onclick = runIdentify;
   $('writeBtn').onclick = doWrite;
   $('nextPhotoBtn').onclick = nextPhotoClick;
@@ -3724,6 +3733,25 @@ async function doExport() {
   }
 }
 
+/** Darwin Core 导出：和「导出清单」同一份数据，只是换成 GBIF 认的列名 */
+async function doExportDwc() {
+  if (!S.dir) return;
+  const btn = $('dwcBtn');
+  const text = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '导出中…';
+  try {
+    const r = await post('/api/export/dwc', { path: S.dir });
+    const coord = r.withCoord ? `，${r.withCoord} 条带坐标` : '，都没有坐标（导入后会缺地图点）';
+    toast(`已导出 ${r.names[0]}：${r.occurrences} 条记录 / ${r.taxa} 个物种${coord}`, 5200);
+  } catch (err) {
+    toast(err.message, 4200);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = text;
+  }
+}
+
 /* ---------------- 写入 ---------------- */
 
 /* ---------------- 批量鉴定后挨个确认：下一张 / 写入后自动跳 ---------------- */
@@ -4374,7 +4402,7 @@ function closePaste() {
 
 function pasteAccept(files) {
   const list = Array.from(files || []).filter(
-    (f) => (f.type || '').startsWith('image/') || /\.(jpe?g|png|webp|bmp|gif|tiff?)$/i.test(f.name || ''),
+    (f) => (f.type || '').startsWith('image/') || isImageName(f.name),
   );
   if (!list.length) return false;
   pasteRun(list[0]);
@@ -5436,7 +5464,7 @@ function bindTabs() {
     if (!b) return;
     showTab(b.dataset.tab);
   };
-  $('reStatsBtn').onclick = () => runStats(STAB.dir || S.dir);
+  $('reStatsBtn').onclick = () => runStats(STAB.roots.length > 1 ? STAB.roots : STAB.dir || S.dir);
   $('stBackBtn').onclick = () => statsLanding();
 }
 
@@ -5447,6 +5475,8 @@ function bindTabs() {
 
 const STAB = {
   dir: '',
+  roots: [], // 多目录汇总时的目录列表（空 = 只统计 dir）
+  picked: new Set(), // 落地页上勾选待汇总的文件夹
   subdirs: [],
   done: false,
   running: false,
@@ -5494,10 +5524,26 @@ async function statsLanding() {
     $('statsEmpty').innerHTML = `<b>读不了这个文件夹</b>${esc(err.message)}`;
     return;
   }
+  STAB.picked.clear();
+  updateStatPickBar();
+  // 汇总条上的两个按钮：每次进落地页都重绑（磁贴会重画，按钮不会，但这样最省心）
+  $('stPickClear').onclick = () => {
+    STAB.picked.clear();
+    updateStatPickBar();
+  };
+  $('stPickRun').onclick = () => {
+    if (STAB.picked.size < 2) return;
+    runStats([...STAB.picked]);
+  };
   const tiles = [statsTile(S.dir, '这个文件夹', '含所有子文件夹')];
   for (const d of STAB.subdirs) tiles.push(statsTile(d.path, d.name, '含它下面的所有层级'));
   grid.innerHTML = tiles.join('');
   grid.onclick = (e) => {
+    const pick = e.target.closest('[data-pick]');
+    if (pick) {
+      toggleStatPick(pick.dataset.pick);
+      return;
+    }
     const card = e.target.closest('.card.pick');
     if (card) runStats(card.dataset.p);
   };
@@ -5510,6 +5556,7 @@ async function statsLanding() {
 /** 落地页上一格文件夹 */
 function statsTile(dirPath, name, sub) {
   return `<div class="card folder pick" data-p="${esc(dirPath)}" title="${esc(dirPath)}">
+      <button class="pickmark" type="button" data-pick="${esc(dirPath)}" title="加入汇总统计（可多选）" aria-label="加入汇总统计">＋</button>
       <div class="thumb fold">
         <svg viewBox="0 0 48 48" width="46" height="46" aria-hidden="true"><path d="M6 14a3 3 0 0 1 3-3h9l4 4.5h17a3 3 0 0 1 3 3v3H6z" fill="#dcae5d"/><path d="M6 19h36l-4 16.5a3 3 0 0 1-3 2.5H12a3 3 0 0 1-3-2.6z" fill="#f0c877"/></svg>
       </div>
@@ -5517,8 +5564,36 @@ function statsTile(dirPath, name, sub) {
     </div>`;
 }
 
+/** 勾选/取消一个待汇总的文件夹 */
+function toggleStatPick(p) {
+  if (!p) return;
+  if (STAB.picked.has(p)) STAB.picked.delete(p);
+  else STAB.picked.add(p);
+  updateStatPickBar();
+}
+
+/** 「已选 N 个」那条：一个都不选时藏起来，只选 1 个时提示再选一个 */
+function updateStatPickBar() {
+  const bar = $('stPickBar');
+  if (!bar) return;
+  const n = STAB.picked.size;
+  bar.hidden = n === 0;
+  $('stPickN').textContent = String(n);
+  const run = $('stPickRun');
+  run.disabled = n < 2;
+  run.textContent = n < 2 ? '再选一个就能汇总' : `汇总统计这 ${n} 个文件夹`;
+  for (const el of document.querySelectorAll('#statsGrid [data-pick]')) {
+    const on = STAB.picked.has(el.dataset.pick);
+    el.classList.toggle('on', on);
+    el.textContent = on ? '✓' : '＋';
+  }
+}
+
 async function runStats(target) {
-  const dir = target || STAB.dir || S.dir;
+  // 单目录：runStats('/path')；多目录汇总：runStats(['/a','/b'])
+  const list = Array.isArray(target) ? target.filter(Boolean) : [];
+  const multi = list.length > 1;
+  const dir = multi ? list[0] : target || STAB.dir || S.dir;
   if (!dir) {
     toast('请先在左侧选择文件夹');
     return;
@@ -5526,18 +5601,21 @@ async function runStats(target) {
   if (STAB.running) return;
   STAB.running = true;
   STAB.dir = dir;
+  STAB.roots = multi ? [...list] : [];
   const body = $('statsBody');
   $('stLand').hidden = true;
   body.hidden = false;
   $('stBackBtn').hidden = false;
   $('reStatsBtn').hidden = true;
-  $('statsPath').textContent = '统计范围：' + dir + '（含所有子文件夹）';
-  $('statsPath').title = dir;
+  $('statsPath').textContent = multi
+    ? `汇总 ${list.length} 个文件夹：${list.map((d) => String(d).split(/[\\/]/).filter(Boolean).pop() || d).join(' + ')}（各含子文件夹）`
+    : '统计范围：' + dir + '（含所有子文件夹）';
+  $('statsPath').title = multi ? list.join('\n') : dir;
   $('statsBusy').hidden = false;
   body.innerHTML = '<div class="st-loading" id="stLoading">正在统计…</div>';
   const stopWatch = statsWatch();
   try {
-    const d = await api('/api/stats?path=' + enc(dir));
+    const d = await api(multi ? '/api/stats?paths=' + enc(JSON.stringify(list)) : '/api/stats?path=' + enc(dir));
     if (!d.ok) throw new Error(d.error || '分析失败');
     STAB.done = true;
     $('reStatsBtn').hidden = false;
@@ -6764,7 +6842,7 @@ async function setSource(mode, opts = {}) {
 
 /** 当前本地文件夹里能看的图片（和标注页同一份 S.files，不额外读盘） */
 function natLocalList() {
-  return (S.files || []).filter((f) => /\.(jpe?g|png|webp|bmp|tiff?)$/i.test(String(f.name || '')));
+  return (S.files || []).filter((f) => isImageName(f.name));
 }
 
 /**
@@ -7650,7 +7728,7 @@ async function natWalkEntry(entry, out, root, depth) {
   if (depth > 8) return;
   if (entry.isFile) {
     const f = await new Promise((resolve) => entry.file(resolve, () => resolve(null)));
-    if (f && /\.(jpe?g|png|webp|bmp|gif|tiff?|heic)$/i.test(f.name)) {
+    if (f && isImageName(f.name)) {
       out.push({ file: f, name: f.name, root });
     }
     return;
@@ -7674,7 +7752,7 @@ async function natCollectDrop(dt) {
   }
   if (!out.length) {
     for (const f of [...(dt.files || [])]) {
-      if (/\.(jpe?g|png|webp|bmp|gif|tiff?|heic)$/i.test(f.name)) out.push({ file: f, name: f.name, root: '' });
+      if (isImageName(f.name)) out.push({ file: f, name: f.name, root: '' });
     }
   }
   return out;
@@ -8603,7 +8681,7 @@ const SCR = {
 // jsdom 验收要拿得到状态；浏览器里 window 一直存在
 if (typeof window !== 'undefined') window.SCR = SCR;
 
-const scIsImage = (n) => /\.(jpe?g|png|webp|bmp|tiff?)$/i.test(String(n || ''));
+const scIsImage = (n) => isImageName(n);
 /** 评分对象：本机端是本页目录（退回标注页目录），相册端是站点相册的伪文件 */
 const scFiles = () => SCR.mode === 'album'
   ? (SCR.albumFiles || [])
