@@ -415,6 +415,22 @@ async function main() {
   console.log(`    macOS    ${base(cfg)}/${PREFIX}tagden-mac-arm64.zip（M 芯片）`);
   console.log(`             ${base(cfg)}/${PREFIX}tagden-mac-x64.zip（Intel）`);
   console.log('');
+
+  // 发完就收拾本机：dist/ 在 OneDrive 里，每版 110 MB 全留着会让同步器反复搬运。
+  // 只留最近 3 版当补丁基线，外加全部「升到当前版」的补丁（老客户端要用）。
+  if (!argv.includes('--no-prune')) {
+    console.log('  清理本机旧发布物（保留最近 3 版 + 全部 *-to-' + manifest.version + '.patch）：');
+    try {
+      require('node:child_process').execFileSync(
+        process.execPath,
+        [path.join(__dirname, 'prune-dist.js')],
+        { stdio: 'inherit', cwd: ROOT },
+      );
+    } catch (err) {
+      console.log(`  [i] 旧包清理失败（不影响已发布的内容）：${err.message}`);
+    }
+    console.log('');
+  }
 }
 
 main().catch((err) => {

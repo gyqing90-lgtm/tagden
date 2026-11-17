@@ -46,6 +46,8 @@ const LOCAL_TAXO = require('./lib/local-taxo');
 // 名录下载：本机没有名录时，引导用户从百度网盘取，下载完自动解压 + 接入
 const TAXO_FETCH = require('./lib/taxo-fetch');
 const STATS = require('./lib/stats');
+// 统计快照：按 size + mtime 复用上次读出来的标签/EXIF，图没动就不重复开文件
+const STATS_CACHE = require('./lib/stats-cache');
 // 名录 → RTF（Word 直接打开，拉丁名斜体），导出调查报告附录用
 const RTF = require('./lib/species-rtf');
 // 诊断包：出问题时一键收集版本/日志/配置填写情况（凭据只报「有没有填」）
@@ -3563,7 +3565,7 @@ async function walkStats(dir, root, out) {
         const rel = path.relative(root, full).split(path.sep).join('/');
         const top = rel.includes('/') ? rel.slice(0, rel.indexOf('/')) : '';
         const folder = rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : '根目录';
-        out.push({ full, name: e.name, stem: path.basename(e.name, path.extname(e.name)), top, folder });
+        out.push({ full, rel, name: e.name, stem: path.basename(e.name, path.extname(e.name)), top, folder });
         STAT_PROGRESS.phase = 'walk';
         STAT_PROGRESS.done = out.length;
       }
@@ -3590,9 +3592,23 @@ async function analyzeStats(dir) {
 
   // 1) 并发读标签 + EXIF：同一次读头把 XMP 和拍摄时间/GPS 一起拿回来。
   //    以前是串行 await，5000 张能拖到几十分钟；这里 8 路并发，且不再为 EXIF 二次开文件。
+  //    先查快照：size + mtime 都没变就直接复用上次读出的结果（图库索引同一思路）。
+  const sCache = STATS_CACHE.open(CACHE, root);
   const STAT_CONC = 8;
   let readDone = 0;
   const items = await mapLimit(files, STAT_CONC, async (f) => {
+    let st = null;
+    try {
+      st = await fsp.stat(f.full);
+    } catch {
+      st = null;
+    }
+    const hit = st ? sCache.get(f.rel, st) : null;
+    if (hit) {
+      readDone += 1;
+      STAT_PROGRESS.done = readDone;
+      return { f, cn: hit.cn, latin: hit.latin, ex: { ...EX.EMPTY, ...hit.ex }, taken: hit.taken, takenSrc: hit.takenSrc };
+    }
     let label = null;
     try {
       label = await IMG.readLabelFastAsync(f.full, { withMeta: true });
@@ -3627,8 +3643,19 @@ async function analyzeStats(dir) {
     }
     readDone += 1;
     STAT_PROGRESS.done = readDone;
-    return { f, cn, latin, ex, taken, takenSrc };
+    const item = { f, cn, latin, ex, taken, takenSrc };
+    sCache.put(f.rel, st, item);
+    return item;
   });
+  const sCacheSaved = sCache.save();
+  const sCacheInfo = sCache.status();
+  if (sCacheInfo.hits) {
+    console.log(
+      `  [i] 统计快照：${files.length} 张里 ${sCacheInfo.hits} 张直接复用（未变），${sCacheInfo.misses} 张重新读取${
+        sCacheSaved.ok ? '' : '；快照未写入'
+      }`,
+    );
+  }
 
   // 2) 批量解析分类（本地名录优先；本地没有才联网，见 lib/taxonomy.js）
   STAT_PROGRESS.phase = 'taxonomy';
@@ -3700,6 +3727,8 @@ async function analyzeStats(dir) {
     path: root,
     total: records.length,
     truncated: false,
+    // 有多少张是走快照复用的：前端可以据此显示「比上次快在哪」
+    cache: { hits: sCacheInfo.hits, misses: sCacheInfo.misses },
     level,
     dimensions: STATS.DIMENSIONS.map(([dim, label]) => ({ dim, label, data: dims[dim] })),
     tree,
