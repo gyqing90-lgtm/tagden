@@ -558,6 +558,7 @@
           <button id="libSearchBtn" class="ghost mini">搜索</button>
           <button id="libDupBtn" class="ghost mini" title="按文件大小 + SHA-256 找内容完全相同的图片">查找重复文件</button>
           <button id="libSimBtn" class="ghost mini" title="对当前搜索结果计算 dHash，找视觉上相似的照片（压缩/裁剪后也能找到）">查找相似图片</button>
+          <button id="libAllBtn" class="ghost mini" title="把多个根目录的扫描结果合并成一份物种清单，适合跨年度做区系分析">全库物种清单</button>
           <span id="libStat" class="lib-stat"></span>
         </div>
       </div>
@@ -567,6 +568,17 @@
         <div id="libEmpty" class="empty" hidden></div>
         <div id="libDup" class="lib-dup" hidden></div>
         <div id="libSim" class="lib-dup" hidden></div>
+        <div id="libAll" class="lib-all" hidden>
+          <div class="lib-all-head">
+            <b>全库物种清单</b>
+            <span id="libAllStat" class="lib-stat"></span>
+            <input id="libAllQ" type="text" spellcheck="false" placeholder="搜中文名 / 学名">
+            <button id="libAllAdd" class="ghost mini" title="把上面「要索引的根文件夹」扫进来并合并（同一个文件夹再并一次是覆盖，不会重复计数）">并入上面这个文件夹</button>
+            <button id="libAllClose" class="ghost mini">收起</button>
+          </div>
+          <div id="libAllRoots" class="lib-all-roots"></div>
+          <div id="libAllList" class="lib-all-list"></div>
+        </div>
       </div>
     </div><!-- /libraryView -->
   </main>

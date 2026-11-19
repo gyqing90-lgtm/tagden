@@ -46,6 +46,8 @@ const LOCAL_TAXO = require('./lib/local-taxo');
 // 名录下载：本机没有名录时，引导用户从百度网盘取，下载完自动解压 + 接入
 const TAXO_FETCH = require('./lib/taxo-fetch');
 const STATS = require('./lib/stats');
+// 区系分析指标：多样性指数 / 优势度分级 / 物种累积与稀疏化曲线
+const DIV = require('./lib/diversity');
 // 统计快照：按 size + mtime 复用上次读出来的标签/EXIF，图没动就不重复开文件
 const STATS_CACHE = require('./lib/stats-cache');
 // 名录 → RTF（Word 直接打开，拉丁名斜体），导出调查报告附录用
@@ -56,6 +58,8 @@ const DWC = require('./lib/dwc');
 const DIAG = require('./lib/diag');
 const { createZip } = require('./build/zip');
 const LIB = require('./lib/library');
+// 跨目录物种索引：多根并存，回答「所有调查目录合起来有多少种」
+const SPIDX = require('./lib/species-index');
 // RAW：不解像素，只掏相机内嵌的 JPEG 预览（缩略图 / 预览 / 识别 / 评分都用它）
 const RAW = require('./lib/raw');
 const REGIONS = require('./lib/regions');
@@ -137,6 +141,8 @@ SCORE.init({ dataDir: DATA, cacheDir: CACHE });
 LLAMA.init({ cacheDir: CACHE });
 IDC.init({ dir: path.join(CACHE, 'identify') });
 LIB.init({ cacheDir: CACHE });
+// 跨目录物种索引：把多个根目录的扫描结果并起来查「全库有多少种」
+SPIDX.init({ cacheDir: CACHE });
 RAW.init({ cacheDir: CACHE });
 // RAW 预览缓存会随改图不断新增（键里带 mtime），启动时清掉 30 天没动过的
 try {
@@ -2211,6 +2217,8 @@ async function apiExport(body) {
       title: '物种名录',
       // 未查到分类的种数由统计行自己说，这里只标来源目录
       note: path.basename(dir),
+      // 名录前面带一张多样性指数表：报告正文要的 H′/D/J/R 直接抄，不用再开 Excel
+      indices: DIV.indicesFromAbundance(species.map((s) => ({ cn: s.cn, latin: s.latin, n: s.n }))),
     }),
     'utf8',
   );
@@ -2359,6 +2367,8 @@ async function apiDiagExport(body, req) {
     llama: { text: llamaText },
     models: llamaModels,
     library: LIB.status(),
+    // 跨目录物种索引：图库页要显示「已并入 N 个目录 / 共 M 种」
+    speciesIndex: SPIDX.status(),
     counts: {
       thumbs: thumbs.files,
       // 只数文件个数。别调 IDC.prune()：那是「超量就删」的清理函数，诊断动作不该改用户缓存
@@ -3921,6 +3931,9 @@ async function analyzeStats(input) {
       order: STATS.rankTable(records, 'order'),
       species: STATS.rankTable(records, 'species'),
     },
+    // 区系分析：指数直接给字符串要写进报告，曲线给降采样后的点集（前端画 SVG）
+    diversity: DIV.indices(records),
+    accumulation: DIV.accumulation(records),
   };
 }
 
@@ -3976,6 +3989,49 @@ function startLibJob(kind, fn) {
       job.error = err && err.message ? err.message : String(err);
     });
   return job.id;
+}
+
+/**
+ * 跨目录物种索引：把一根目录扫进「全库」，之后清单只在内存里合并。
+ * 扫描直接复用 LIB.scan（同一套 walk / 读标签逻辑），扫完立刻并入索引。
+ */
+async function handleSpeciesIndex(req, res, pathname, q) {
+  if (pathname === '/api/species-index' && req.method === 'GET') {
+    return sendJson(res, 200, SPIDX.species({
+      q: q.get('q') || '',
+      sort: q.get('sort') || 'count',
+      limit: q.get('limit') || 2000,
+      offset: q.get('offset') || 0,
+    }));
+  }
+  if (pathname === '/api/species-index/status' && req.method === 'GET') {
+    return sendJson(res, 200, SPIDX.status());
+  }
+  if (pathname === '/api/species-index/scan' && req.method === 'POST') {
+    const b = await readJson(req);
+    const root = String(b.root || '').trim();
+    if (!root) throw bad('请填写要加入全库索引的文件夹');
+    const id = startLibJob('species-index', async (job) => {
+      job.phase = 'walking';
+      const st = await LIB.scan(root, {
+        isCancelled: () => job.cancelled,
+        onProgress: (p) => {
+          job.phase = p.phase;
+          job.done = p.done;
+          job.total = p.total || 0;
+          job.current = p.current || '';
+        },
+      });
+      const merged = SPIDX.upsert(root, LIB.current().items);
+      return { ...st, indexed: merged.count, speciesCount: merged.speciesCount };
+    });
+    return sendJson(res, 200, { ok: true, id });
+  }
+  if (pathname === '/api/species-index/remove' && req.method === 'POST') {
+    const b = await readJson(req);
+    return sendJson(res, 200, SPIDX.remove(String(b.root || '')));
+  }
+  throw bad('未知的全库索引接口');
 }
 
 async function handleLibrary(req, res, pathname, q) {
@@ -4408,6 +4464,9 @@ async function handleApi(req, res, pathname, q) {
 
   // 图库：全库索引 / 搜索 / 重复文件
   if (pathname.startsWith('/api/library/')) return handleLibrary(req, res, pathname, q);
+
+  // 跨目录物种索引：多根合并查「全库有多少种」
+  if (pathname.startsWith('/api/species-index')) return handleSpeciesIndex(req, res, pathname, q);
 
   // 盘符（左侧树的根）。卷标是后台查的，第一次可能还没到，前端据此再拉一次
   if (pathname === '/api/drives') {

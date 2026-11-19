@@ -47,6 +47,10 @@ const MODULES = [
   'lib/taxo-fetch.js',
   'lib/taxonomy.js',
   'lib/stats.js',
+  // 区系分析指标（多样性指数 / 累积曲线）：漏了它，统计页在 exe 里会报「模块未打包」
+  'lib/diversity.js',
+  // 跨目录物种索引：漏了它，全库清单在 exe 里会报「模块未打包」
+  'lib/species-index.js',
   // 统计快照缓存（按 size+mtime 复用，图没变就不重读）：漏了它，exe 会报「模块未打包」
   'lib/stats-cache.js',
   // 名录导出的 RTF 生成器：漏了它，导出「附录格式名录」在 exe 里会报「模块未打包」

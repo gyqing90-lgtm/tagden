@@ -90,6 +90,8 @@ tagden/
 │   ├── stats-cache.js  ★ 统计快照（size+mtime 命中就不重读，和 library 索引一个思路）
 │   ├── raw.js         ★ RAW 取内嵌 JPEG 预览（.nef/.cr2/.arw/.dng…，缩略图/识别/评分都用）
 │   ├── dwc.js         ★ Darwin Core 导出（occurrence.txt / taxon.txt / meta.xml）
+│   ├── diversity.js   ★ 区系分析：H′/D/J/R、优势度分级、Chao1、物种累积与稀疏化曲线
+│   ├── species-index.js ★ 跨目录物种索引（多根并存，合并去重出全库清单）
 ├── public/            index.html / app.js / style.css（打包后内联进 exe）
 │                      colcn.bin = 名录索引（gzip，base64 内联进 exe）
 ├── tools/build-colcn.js  ★ 名录索引构建器（`--download` 自动抓当年分册）

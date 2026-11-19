@@ -132,6 +132,23 @@ function resolveNotes(argv) {
  * 例：TAGDEN_WIN_SIGN_CMD='signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /sha1 <指纹> {exe}'
  * 没配置就照旧输出未签名 exe（SmartScreen 仍会提示）。
  */
+/**
+ * 把版本号同步进 package.json（源码模式读的是它）。写不了就算了，不影响打包。
+ */
+function syncPkgVersion(version) {
+  try {
+    const file = path.join(ROOT, 'package.json');
+    const raw = fs.readFileSync(file, 'utf8');
+    const pkg = JSON.parse(raw);
+    if (pkg.version === version) return;
+    pkg.version = version;
+    fs.writeFileSync(file, `${JSON.stringify(pkg, null, 2)}\n`, 'utf8');
+    console.log(`  package.json 版本同步为 ${version}`);
+  } catch (err) {
+    console.log(`  （package.json 版本没同步：${err.message}）`);
+  }
+}
+
 function signWindowsExe(file) {
   const cmd = String(process.env.TAGDEN_WIN_SIGN_CMD || '').trim();
   if (!cmd) {
@@ -283,6 +300,9 @@ function main() {
   const size = (fs.statSync(exePath).size / 1024 / 1024).toFixed(1);
   const digest = crypto.createHash('sha256').update(fs.readFileSync(exePath)).digest('hex');
   fs.writeFileSync(VERSION_FILE, version + '\n', 'utf8');
+  // package.json 的 version 也要跟着走：源码运行时 lib/version.js 读的是它，
+  // 不跟着改，改完的源码会一直弹「有新版本」，排查时反而被这个假版本误导。
+  syncPkgVersion(version);
   fs.rmSync(BUILD, { recursive: true, force: true });
 
   /* ---------- 发布物：带版本号的副本 + 更新清单（放 dist/） ----------

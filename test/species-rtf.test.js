@@ -103,3 +103,35 @@ test('buildRtf：空名录不崩，给出提示行', () => {
   assert.match(rtf, /\\rtf1/);
   assert.match(rtf, /\\u/); // 提示文案也转义了
 });
+
+test('buildRtf：给了 indices 就在名录前插一张指数表，不给就不插', () => {
+  const idx = {
+    S: 5, N: 120,
+    shannon: 1.5234, simpson: 0.7123, pielou: 0.9467, margalef: 0.8361,
+    bergerParker: 0.325, chao1: 6.5, completeness: 0.7692,
+    dominance: { counts: { dominant: 1, common: 2, rare: 2 } },
+  };
+  const withIdx = buildRtf({ species: SAMPLE, indices: idx });
+  assert.match(withIdx, /\\trowd/, '应有表格行定义');
+  const rows = (withIdx.match(/\\row/g) || []).length;
+  assert.strictEqual(rows, 11, '表头 + 10 行指标');
+  assert.match(withIdx, /Shannon-Wiener/);
+  assert.match(withIdx, /1\.5234/, 'H′ 保留 4 位');
+  assert.match(withIdx, /6\.5/, 'Chao1 保留 1 位');
+
+  const without = buildRtf({ species: SAMPLE });
+  assert.ok(!/\\trowd/.test(without), '没有指数时不该出现表格');
+  assert.ok(!/Shannon-Wiener/.test(without));
+});
+
+test('buildRtf：指数为 0（空统计）时不插表，避免一堆 0 的表进报告', () => {
+  const rtf = buildRtf({ species: SAMPLE, indices: { S: 0, N: 0 } });
+  assert.ok(!/\\trowd/.test(rtf));
+});
+
+test('rtfTable2：列宽按累计 twip 写 cellx', () => {
+  const { rtfTable2 } = require('../lib/species-rtf');
+  const out = rtfTable2([['a', 'b'], ['c', 'd']], [1000, 2000]).join('\n');
+  assert.match(out, /\\cellx1000\\cellx3000/);
+  assert.strictEqual((out.match(/\\intbl/g) || []).length, 4, '两行两列共四个格');
+});

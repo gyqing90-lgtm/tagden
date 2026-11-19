@@ -78,6 +78,7 @@ const LIB = {
   job: '',
   kind: '',
   timer: 0,
+  all: null, // 全库物种清单（跨目录索引）的最近一次结果
 };
 if (typeof window !== 'undefined') window.LIB = LIB;
 
@@ -1331,6 +1332,9 @@ function render() {
   // 文件夹只放在第 1 页：每页都重复一遍会让人以为有多份。
   const showDirs = S.filter === 'all' && S.page === 1 ? S.dirs : [];
   grid.innerHTML = showDirs.map(folderCardHtml).join('') + list.map(cardHtml).join('');
+  // 超过 800 张才让浏览器跳过屏外卡片的排版（5000 张滚动中位帧 71→20ms）；
+  // 小目录不开：contain-intrinsic-size 是估值，卡片少时没必要承担那点滚动条误差。
+  grid.classList.toggle('cv-on', grid.children.length > 800);
 
   // 建 path -> 卡片 的索引，后面只改单个节点
   for (const el of grid.children) {
@@ -5060,6 +5064,7 @@ function libRender() {
   const grid = $('libGrid');
   if (!grid) return;
   grid.innerHTML = (LIB.items || []).map(libCardHtml).join('');
+  grid.classList.toggle('cv-on', grid.children.length > 800);
   grid.hidden = !LIB.items.length;
   const empty = $('libEmpty');
   if (!LIB.items.length) {
@@ -5149,6 +5154,10 @@ async function libPoll() {
       LIB.status = await api('/api/library/status');
       toast(`索引完成：${LIB.status.total} 张照片`, 3000);
       await libSearch();
+    } else if (LIB.kind === 'species') {
+      const n = (j.result && j.result.indexed) || 0;
+      toast(`已并入全库：${n} 张有名字的图`, 3200);
+      await libAllLoad();
     } else {
       LIB.dups = j.result || { groups: [] };
       libRenderDups();
@@ -5209,6 +5218,107 @@ async function libCancel() {
     $('libPText').textContent = '正在取消…';
   } catch (err) {
     toast('取消失败：' + err.message, 3000);
+  }
+}
+
+/* ---------------- 图库：全库物种清单（跨目录索引） ----------------
+ * 和「建立 / 更新索引」是两件事：那个是当前这一个库的搜索与查重；
+ * 这个把多个根目录的扫描结果并存，合并去重后回答「所有调查合起来有多少种」。
+ */
+
+async function libAllToggle() {
+  const box = $('libAll');
+  if (!box) return;
+  const show = box.hidden;
+  box.hidden = !show;
+  $('libAllBtn').classList.toggle('on', show);
+  if (show) await libAllLoad();
+}
+
+async function libAllLoad() {
+  if (!$('libAll')) return;
+  const q = String($('libAllQ').value || '').trim();
+  try {
+    LIB.all = await api('/api/species-index' + (q ? '?q=' + enc(q) : ''));
+  } catch (err) {
+    $('libAllList').innerHTML = `<div class="muted">读全库清单失败：${esc(err.message)}</div>`;
+    return;
+  }
+  libAllRender();
+}
+
+function libAllRender() {
+  const d = LIB.all;
+  if (!d) return;
+  const photos = d.roots.reduce((s, r) => s + r.count, 0);
+  $('libAllStat').textContent = d.roots.length
+    ? `${d.roots.length} 个目录 · ${d.total} 种 · ${photos} 张有名字`
+    : '还没有目录';
+  $('libAllRoots').innerHTML = d.roots.length
+    ? d.roots
+        .map(
+          (r) =>
+            `<span class="lib-all-root" title="${esc(r.root)}">${esc(r.name)} <i>${r.count}</i><button type="button" data-rm="${esc(r.root)}" title="从全库移除（不删文件）">×</button></span>`,
+        )
+        .join('')
+    : '<span class="muted">还没有目录。在上面填好根文件夹后点「并入上面这个文件夹」；多个目录会合并去重。</span>';
+
+  if (!d.list.length) {
+    $('libAllList').innerHTML = `<div class="muted">${d.roots.length ? '没有匹配的物种' : '清单是空的'}</div>`;
+    return;
+  }
+  const rows = d.list
+    .map(
+      (s, i) => `<tr>
+      <td class="idx">${i + 1}</td>
+      <td>${esc(s.cn || '—')}</td>
+      <td class="lat">${esc(s.latin || '')}</td>
+      <td class="cnt">${s.n}</td>
+      <td class="cnt">${s.roots.length}</td>
+      <td class="dt">${esc(s.first || '')}</td>
+      <td class="dt">${esc(s.last || '')}</td>
+    </tr>`,
+    )
+    .join('');
+  const more =
+    d.matched > d.list.length
+      ? `<div class="un-note">只显示了前 ${d.list.length} 种（共 ${d.matched} 种），用上面的搜索框缩小范围。</div>`
+      : '';
+  $('libAllList').innerHTML = `<table class="un-table lib-all-table">
+      <thead><tr><th>#</th><th>中文名</th><th>学名</th><th style="text-align:right">张数</th><th style="text-align:right">目录</th><th>首见</th><th>末见</th></tr></thead>
+      <tbody>${rows}</tbody></table>${more}`;
+}
+
+async function libAllAdd() {
+  if (LIB.busy) return toast('正在扫描，等这个跑完');
+  const root = String($('libRoot') && $('libRoot').value ? $('libRoot').value : S.dir || '').trim();
+  if (!root) return toast('先在上面填要索引的根文件夹');
+  LIB.busy = true;
+  LIB.kind = 'species';
+  $('libCancelBtn').hidden = false;
+  $('libProgress').hidden = false;
+  $('libBar').style.width = '2%';
+  $('libPText').textContent = '正在扫描并并入全库…';
+  try {
+    const r = await post('/api/species-index/scan', { root });
+    LIB.job = r.id;
+    libPoll();
+  } catch (err) {
+    LIB.busy = false;
+    $('libCancelBtn').hidden = true;
+    $('libProgress').hidden = true;
+    toast('并入失败：' + err.message, 4200);
+  }
+}
+
+async function libAllRemove(root) {
+  if (!root) return;
+  try {
+    await post('/api/species-index/remove', { root });
+    await libAllLoad();
+    toast('已从全库移除（文件没动）', 2600);
+  } catch (err) {
+    toast('移除失败：' + err.message, 3600);
   }
 }
 
@@ -5407,6 +5517,20 @@ function bindLibrary() {
   if ($('libSimBtn')) $('libSimBtn').onclick = libFindSimilar;
   if ($('libMoreBtn')) $('libMoreBtn').onclick = () => libSearch(true);
   if ($('libCancelBtn')) $('libCancelBtn').onclick = libCancel;
+  if ($('libAllBtn')) $('libAllBtn').onclick = libAllToggle;
+  if ($('libAllClose')) $('libAllClose').onclick = libAllToggle;
+  if ($('libAllAdd')) $('libAllAdd').onclick = libAllAdd;
+  if ($('libAllRoots')) $('libAllRoots').onclick = (e) => {
+    const b = e.target.closest('[data-rm]');
+    if (b) libAllRemove(b.dataset.rm);
+  };
+  if ($('libAllQ')) {
+    let t = 0;
+    $('libAllQ').oninput = () => {
+      clearTimeout(t);
+      t = setTimeout(() => libAllLoad(), 260);
+    };
+  }
   if ($('libGrid')) $('libGrid').onclick = (e) => {
     const card = e.target.closest('.card[data-p]');
     if (!card) return;
@@ -5901,6 +6025,110 @@ function paintTrend() {
   box.innerHTML = body;
 }
 
+/* ---------------- 仪表盘：多样性指数（区系分析） ----------------
+ * 算法与口径在 lib/diversity.js；这里只管摆。
+ * 这些数字是要抄进调查报告的，所以口径提示直接写在卡上，别让人猜。
+ */
+
+function stKv(label, value, cls) {
+  return `<div class="st-kv${cls ? ' ' + cls : ''}"><span title="${esc(label)}">${esc(label)}</span><b>${esc(value)}</b></div>`;
+}
+
+function paintDiv() {
+  const box = $('stDivBox');
+  if (!box || !STAB.data) return;
+  const d = STAB.data.diversity;
+  if (!d || !d.S) {
+    box.innerHTML = '<div class="st-empty-mini">还没有已鉴定且解析出分类的图，多样性指数要等有物种才算得出来。</div>';
+    return;
+  }
+  const dom = (d.dominance && d.dominance.counts) || {};
+  const pct = Math.max(0, Math.min(100, (d.completeness || 0) * 100));
+  const onlyOnce = d.f1 ? `<span>其中 ${d.f1} 种只见到 1 次</span>` : '';
+  box.innerHTML = `
+    <div class="st-kvs">
+      ${stKv('物种数 S', String(d.S))}
+      ${stKv('个体数 N', String(d.N))}
+      ${stKv('Shannon H′', d.shannon.toFixed(4))}
+      ${stKv('Simpson D', d.simpson.toFixed(4))}
+      ${stKv('Pielou J', d.pielou.toFixed(4))}
+      ${stKv('Margalef R', d.margalef.toFixed(2))}
+    </div>
+    <div class="st-dom">
+      <span class="st-dom-pill dom">优势种 <b>${dom.dominant || 0}</b></span>
+      <span class="st-dom-pill common">常见种 <b>${dom.common || 0}</b></span>
+      <span class="st-dom-pill rare">稀有种 <b>${dom.rare || 0}</b></span>
+      <span class="st-dom-note">≥5% / 1%~5% / &lt;1%</span>
+    </div>
+    <div class="st-comp">
+      <div class="st-comp-head"><span>调查完整度（S / Chao1）</span><b>${pct.toFixed(0)}%</b></div>
+      <div class="st-comp-bar"><i style="width:${pct.toFixed(1)}%"></i></div>
+      <div class="st-comp-note"><span>Chao1 估计 ${d.chao1.toFixed(1)} 种</span>${onlyOnce}<span>Berger-Parker d = ${d.bergerParker.toFixed(4)}</span></div>
+    </div>`;
+}
+
+/** 折线图：面积小，直接用 SVG 画，省掉 canvas 的缩放与重绘 */
+function stLineChart(sets) {
+  const W = 320;
+  const H = 130;
+  const padL = 30;
+  const padR = 8;
+  const padT = 10;
+  const padB = 20;
+  const pts = sets.flatMap((s) => s.points || []);
+  if (!pts.length) return '<div class="st-empty-mini">没有可画的数据。</div>';
+  const maxX = Math.max(1, ...pts.map((p) => p.n));
+  const maxY = Math.max(1, ...pts.map((p) => p.s));
+  const X = (n) => padL + (n / maxX) * (W - padL - padR);
+  const Y = (s) => H - padB - (s / maxY) * (H - padT - padB);
+  const grid = [0, 0.5, 1]
+    .map((r) => {
+      const y = H - padB - r * (H - padT - padB);
+      return `<line class="st-ax" x1="${padL}" y1="${y.toFixed(1)}" x2="${W - padR}" y2="${y.toFixed(1)}"/>`;
+    })
+    .join('');
+  const lines = sets
+    .map((s) => {
+      const d = (s.points || []).map((p) => `${X(p.n).toFixed(1)},${Y(p.s).toFixed(1)}`).join(' ');
+      return d ? `<polyline class="st-line ${s.cls || ''}" points="${d}"/>` : '';
+    })
+    .join('');
+  return `<svg class="st-curve" viewBox="0 0 ${W} ${H}" role="img" aria-label="物种累积曲线">
+      ${grid}
+      <text class="st-ax-txt" x="${padL - 4}" y="${padT + 8}" text-anchor="end">${maxY}</text>
+      <text class="st-ax-txt" x="${padL - 4}" y="${H - padB + 3}" text-anchor="end">0</text>
+      <text class="st-ax-txt" x="${W - padR}" y="${H - 6}" text-anchor="end">${maxX} 个体</text>
+      ${lines}
+    </svg>`;
+}
+
+function paintAcc() {
+  const box = $('stAccBox');
+  if (!box || !STAB.data) return;
+  const acc = STAB.data.accumulation;
+  if (!acc || !acc.observed || acc.observed.length < 2) {
+    box.innerHTML =
+      '<div class="st-empty-mini">需要至少两张带拍摄时间的图才能画累积曲线。<br>没有拍摄时间的图，统计页会退回文件修改时间，一般不会空。</div>';
+    return;
+  }
+  const last = acc.observed[acc.observed.length - 1];
+  const rareEnd = acc.rarefaction.length ? acc.rarefaction[acc.rarefaction.length - 1].s : 0;
+  const gap = rareEnd - last.s;
+  // 实测明显低于抽样期望，说明采集偏聚集（同一地点同一时间连拍一堆），提示一句就够了
+  const note = gap > Math.max(2, rareEnd * 0.1)
+    ? `<div class="st-acc-note">实测比期望低 ${gap.toFixed(1)} 种，说明采集偏聚集；想让曲线更接近期望，可在不同月份、不同样点补拍。</div>`
+    : '';
+  box.innerHTML = `${stLineChart([
+    { cls: 'rare', points: acc.rarefaction },
+    { cls: 'obs', points: acc.observed },
+  ])}
+    <div class="st-acc-foot">
+      <span class="lg"><i class="dot obs"></i>实测累积 <b>${last.s}</b> 种</span>
+      <span class="lg"><i class="dot rare"></i>抽样期望 <b>${rareEnd.toFixed(1)}</b></span>
+      <span>${acc.dayCount} 个采样日 · ${acc.N} 张</span>
+    </div>${note}`;
+}
+
 /* ---------------- 仪表盘：活跃热力图（GitHub 风格） ---------------- */
 
 function heatLevel(n, max) {
@@ -6068,7 +6296,11 @@ function renderStats(d) {
     </div>`
   );
 
-  // ⑤ 活跃热力图 + 器材
+  // ⑤ 区系分析：多样性指数 + 物种累积曲线（写报告正文要的数）
+  html += stCard('多样性指数', 'H′/D/J/R · N=照片数', '<div id="stDivBox"></div>', 'span2');
+  html += stCard('物种累积曲线', '实测 vs 抽样期望', '<div id="stAccBox"></div>');
+
+  // ⑥ 活跃热力图 + 器材
   html += stCard(
     '活跃热力图',
     '每天拍了多少',
@@ -6117,6 +6349,8 @@ function renderStats(d) {
   $('statsBody').innerHTML = html;
   paintCat();
   paintTrend();
+  paintDiv();
+  paintAcc();
   paintHeat();
   paintRank();
 
@@ -6544,6 +6778,7 @@ function renderAlbum() {
   const grid = $('grid');
   S.els.clear();
   grid.innerHTML = S.files.map(albumCardHtml).join('');
+  grid.classList.toggle('cv-on', grid.children.length > 800);
   for (const el of grid.children) {
     const p = el.dataset.p;
     if (p) S.els.set(p, el);
