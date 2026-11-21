@@ -437,16 +437,26 @@
             <option value="6">6</option><option value="8">8</option>
           </select></div>
           <p class="sc-tip">Key 加密存在本机配置文件里，界面只显示「已配置」，升级或换程序都不会丢。到 <a href="https://bailian.console.aliyun.com/" target="_blank" rel="noopener">阿里云百炼控制台</a> 自行申请并开通 Qwen-VL 模型。</p>
-          <div class="sc-dlg-sub">GBIF 中文名补全 · DeepSeek</div>
-          <p class="sc-tip">GBIF 自己的读取接口是公开的、<b>不需要 API Key</b>；这里填的是给 GBIF 记录补中文名、写归纳用的 DeepSeek Key。到 <a href="https://platform.deepseek.com/" target="_blank" rel="noopener">platform.deepseek.com</a> 申请。留空＝不修改，明文不会回传。</p>
-          <div class="sc-cfg-row"><label>DeepSeek Key</label>
+          <div class="sc-dlg-sub">GBIF 中文名补全 · 模型接口</div>
+          <p class="sc-tip">GBIF 自己的读取接口是公开的、<b>不需要 API Key</b>；这里填的是给 GBIF 记录补中文名、写归纳用的模型 Key。走的是 OpenAI 兼容接口，<b>DeepSeek 官方</b>和<b>云知声 MaaS</b> 都能用：<span id="gxApplyWrap">到 <a id="gxApply" href="https://platform.deepseek.com/" target="_blank" rel="noopener">platform.deepseek.com</a> 申请</span>。留空＝不修改，明文不会回传。</p>
+          <div class="sc-cfg-row"><label>服务商</label><select id="gxProvider">
+            <option value="deepseek">DeepSeek 官方</option>
+            <option value="unisound">云知声 MaaS（OpenAI 兼容）</option>
+            <option value="custom">自定义接口</option>
+          </select></div>
+          <div class="sc-cfg-row"><label>接口地址</label>
+            <input id="gxBase" type="text" spellcheck="false" autocomplete="off" placeholder="https://api.deepseek.com">
+          </div>
+          <div class="sc-cfg-row"><label>API Key</label>
             <input id="gxKey" type="password" spellcheck="false" autocomplete="off" placeholder="sk-…（已配置就留空）">
             <span class="sc-hint" id="gxKeyHint"></span>
           </div>
           <div class="sc-cfg-row"><label>模型</label>
-            <input id="gxModel" type="text" spellcheck="false" autocomplete="off" placeholder="deepseek-chat">
+            <input id="gxModel" type="text" spellcheck="false" autocomplete="off" list="gxModels" placeholder="deepseek-chat">
+            <button id="gxModelsBtn" class="ghost mini" title="用已保存的 Key 问一下服务商，列出这个账号真正有权限的模型">列出可用模型</button>
+            <datalist id="gxModels"></datalist>
           </div>
-          <button id="gxKeyClear" class="ghost mini" title="清掉已保存的 DeepSeek Key，GBIF 面板就只出可核查的记录">清除 GBIF 的 Key</button>
+          <button id="gxKeyClear" class="ghost mini" title="清掉已保存的模型 Key，GBIF 面板就只出可核查的记录">清除 GBIF 的 Key</button>
           <button id="scTestBtn" class="ghost mini">测试连接</button>
           <div class="sc-dlg-sub">合并中文名 · 中国生物物种名录</div>
           <p class="sc-tip">识别结果与<b>文件名里的中文名</b>统一采用 <a href="http://www.sp2000.org.cn/" target="_blank" rel="noopener">物种2000中国节点</a>《中国生物物种名录》的大陆规范名（例如 <i>Papilio bianor</i> 是「碧翠凤蝶」，而非俗称「碧凤蝶」）。名录已<b>内置在程序里</b>，不需要 API Key、不联网；名录未收录或本身没有中文名的物种，保留识别站点原名。</p>

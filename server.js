@@ -315,9 +315,11 @@ if (!config.seedKeysPurged) {
   config.seedKeysPurged = true;
   persistConfig();
 }
-// GBIF 面板的中文名补全 / 归纳用 DeepSeek。GBIF 自己的读取接口是公开的、不需要 Key，
-// 要 Key 的是这一步；跟站点账号一起加密落在 data/config.json，浏览器端只拿得到 hasApiKey。
-config.deepseek = { apiKey: '', model: 'deepseek-chat', ...(config.deepseek || {}) };
+// GBIF 面板的中文名补全 / 归纳用一个 OpenAI 兼容接口。GBIF 自己的读取接口是公开的、
+// 不需要 Key，要 Key 的是这一步。baseUrl 留空＝DeepSeek 官方；填云知声 MaaS 的
+// https://maas-api.unisound.com/v1 就走那边的 deepseek 模型，payload 不用改。
+// 跟站点账号一起加密落在 data/config.json，浏览器端只拿得到 hasApiKey。
+config.deepseek = { apiKey: '', model: 'deepseek-chat', baseUrl: '', ...(config.deepseek || {}) };
 let sites = new Sites(config);
 
 // 大陆中文名录随程序内置，不需要任何配置，也不写进 config.json。
@@ -3637,6 +3639,12 @@ function apiState() {
     deepseek: {
       hasApiKey: Boolean(String(config.deepseek?.apiKey || '').trim()),
       model: String(config.deepseek?.model || 'deepseek-chat'),
+      baseUrl: String(config.deepseek?.baseUrl || ''),
+      provider: GBIFDS.providerOf(config.deepseek?.baseUrl),
+      label: GBIFDS.providerLabel(config.deepseek?.baseUrl),
+      // 服务商预设（标签 / base / 默认模型 / 候选模型 / 申请地址）由后端给出，
+      // 前端不再各写一份，加一家新的只需要改 lib/gbifds.js
+      providers: GBIFDS.PROVIDERS,
     },
     // 内置大陆中文名录状态：设置页显示版本 / 收录条数，无需任何配置
     colcn: COLCN.stat(),
@@ -4835,15 +4843,17 @@ async function handleApi(req, res, pathname, q) {
     }
     const dsKey = String(config.deepseek?.apiKey || '').trim();
     const dsModel = String(config.deepseek?.model || 'deepseek-chat');
+    const dsBase = String(config.deepseek?.baseUrl || '');
+    const dsLabel = GBIFDS.providerLabel(dsBase);
     let answer = null;
     let warning = '';
     if (!dsKey) {
-      warning = 'GBIF 的读取接口是公开的、不需要 API Key；这里缺的是补中文名和归纳用的 DeepSeek Key。到「照片评分 → AI 设置」里填一个就能补齐。';
+      warning = 'GBIF 的读取接口是公开的、不需要 API Key；这里缺的是补中文名和归纳用的模型 Key。到「照片评分 → AI 设置」里填一个就能补齐。';
     } else {
       try {
-        answer = await GBIFDS.ask({ apiKey: dsKey, model: dsModel, question, data, known: inat.map });
+        answer = await GBIFDS.ask({ apiKey: dsKey, model: dsModel, baseUrl: dsBase, question, data, known: inat.map });
       } catch (err) {
-        warning = 'DeepSeek 没答上来：' + (err.message || '未知错误') + '（GBIF 记录和 iNaturalist 中文名不受影响）';
+        warning = `${dsLabel} 没答上来：` + (err.message || '未知错误') + '（GBIF 记录和 iNaturalist 中文名不受影响）';
       }
     }
     let nInat = 0;
@@ -4858,7 +4868,7 @@ async function handleApi(req, res, pathname, q) {
     const named = species.filter((s) => s.cn).length;
     if (!warning) {
       warning = named
-        ? `中文名 ${named}/${species.length} 个：iNaturalist ${nInat} · DeepSeek ${nDs}，学名一律以 GBIF 为准。`
+        ? `中文名 ${named}/${species.length} 个：iNaturalist ${nInat} · ${dsLabel} ${nDs}，学名一律以 GBIF 为准。`
         : 'GBIF 有记录，但两处都没配出中文名；下面就是原始记录。';
     }
     return sendJson(res, 200, {
@@ -4882,7 +4892,7 @@ async function handleApi(req, res, pathname, q) {
         : { summary: '', cn: {}, extra: [], cnStats: { inat: nInat, ds: nDs, missing: species.length - named } },
       warning,
       cnLookup: { tried: inat.tried || 0, stopped: Boolean(inat.stopped) },
-      deepseek: { hasApiKey: Boolean(dsKey), model: dsModel },
+      deepseek: { hasApiKey: Boolean(dsKey), model: dsModel, baseUrl: dsBase, label: dsLabel },
     });
   }
 
@@ -4962,6 +4972,23 @@ async function handleApi(req, res, pathname, q) {
     return sendJson(res, 200, COLCN.test(body && body.scientificName ? body.scientificName : ''));
   }
 
+  // 列这个 Key 实际能用的模型：账号能开哪些由服务商后台决定，猜名字容易撞 model_not_found。
+  // 只读，不改配置；body 里可以临时带 baseUrl 试别的服务商，不传就用已存的。
+  if (pathname === '/api/ds/models' && req.method === 'POST') {
+    const body = await readJson(req).catch(() => ({}));
+    const key = String((body && body.apiKey) || config.deepseek?.apiKey || '').trim();
+    if (!key) return sendJson(res, 200, { ok: false, error: '还没保存 API Key' });
+    const baseUrl = typeof body?.baseUrl === 'string' && body.baseUrl.trim()
+      ? body.baseUrl.trim()
+      : String(config.deepseek?.baseUrl || '');
+    try {
+      const models = await GBIFDS.listModels({ apiKey: key, baseUrl });
+      return sendJson(res, 200, { ok: true, models, provider: GBIFDS.providerOf(baseUrl) });
+    } catch (err) {
+      return sendJson(res, 200, { ok: false, error: err.message || '取模型列表失败' });
+    }
+  }
+
   if (pathname === '/api/config' && req.method === 'POST') {
     const body = await readJson(req);
     if (body.preset) {
@@ -5012,6 +5039,11 @@ async function handleApi(req, res, pathname, q) {
       const k = String(d.apiKey || '').trim();
       if (k) next.apiKey = k;
       if (typeof d.model === 'string' && d.model.trim()) next.model = d.model.trim();
+      // baseUrl 允许清空（回到 DeepSeek 官方）：显式传空串＝重置，不传＝不动
+      if (typeof d.baseUrl === 'string') {
+        const b = d.baseUrl.trim().replace(/\s+/g, '');
+        next.baseUrl = b ? GBIFDS.chatUrl(b).replace(/\/chat\/completions$/i, '') : '';
+      }
       if (d.clear === true) next.apiKey = '';
       config.deepseek = next;
     }

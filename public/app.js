@@ -10178,25 +10178,78 @@ function scFill(sel, list, cur, label, value) {
   if (sel.value !== String(cur)) sel.selectedIndex = 0;
 }
 
-/** GBIF 面板那份 DeepSeek 配置：只回「有没有」，明文 Key 永远不进浏览器 */
-function gxCfgPaint() {
+/** GBIF 面板那份模型接口配置：只回「有没有」，明文 Key 永远不进浏览器 */
+function gxProviders() {
   const d = (S.state && S.state.deepseek) || {};
+  return { d, providers: d.providers || {} };
+}
+
+function gxModelList(models) {
+  const dl = $('gxModels');
+  if (dl) dl.innerHTML = (models || []).map((m) => `<option value="${esc(m)}"></option>`).join('');
+}
+
+/** 切换服务商时把接口地址、默认模型、申请入口一起换掉（用户仍可改） */
+function gxProviderApply(p, keepModel) {
+  const { providers } = gxProviders();
+  const conf = providers[p];
+  if (!conf) return;
+  if ($('gxBase')) $('gxBase').value = conf.base || '';
+  if (!keepModel && $('gxModel')) $('gxModel').value = conf.model || '';
+  gxModelList(conf.models || []);
+  if ($('gxApply') && conf.apply) {
+    $('gxApply').href = conf.apply;
+    $('gxApply').textContent = conf.apply.replace(/^https?:\/\//, '').replace(/\/$/, '');
+  }
+  if ($('gxApplyWrap')) $('gxApplyWrap').hidden = !conf.apply;
+}
+
+function gxCfgPaint() {
+  const { d, providers } = gxProviders();
   if ($('gxKey')) $('gxKey').value = '';
   if ($('gxKeyHint')) {
     $('gxKeyHint').textContent = d.hasApiKey ? '已配置（留空即不改动）' : '未配置';
     $('gxKeyHint').style.color = d.hasApiKey ? 'var(--green-d)' : 'var(--ink-3)';
   }
-  if ($('gxModel')) $('gxModel').value = d.model || 'deepseek-chat';
+  // 存的是哪家就选哪家；认不出来的地址归到「自定义接口」
+  const pid = providers[d.provider] ? d.provider : d.baseUrl ? 'custom' : 'deepseek';
+  if ($('gxProvider')) $('gxProvider').value = pid;
+  const conf = providers[pid] || {};
+  if ($('gxBase')) $('gxBase').value = d.baseUrl || conf.base || '';
+  if ($('gxModel')) $('gxModel').value = d.model || conf.model || 'deepseek-chat';
+  gxModelList(conf.models || []);
+  if ($('gxApply') && conf.apply) {
+    $('gxApply').href = conf.apply;
+    $('gxApply').textContent = conf.apply.replace(/^https?:\/\//, '').replace(/\/$/, '');
+  }
+  if ($('gxApplyWrap')) $('gxApplyWrap').hidden = pid === 'custom';
 }
 
 async function gxKeySave() {
   const key = ($('gxKey') && $('gxKey').value || '').trim();
   const model = ($('gxModel') && $('gxModel').value || '').trim();
-  if (!key && !model) return;
-  const st = await post('/api/config', { deepseek: { apiKey: key, model } });
+  const baseUrl = ($('gxBase') && $('gxBase').value || '').trim();
+  if (!key && !model && !baseUrl) return;
+  const st = await post('/api/config', { deepseek: { apiKey: key, model, baseUrl } });
   if (st && st.deepseek) S.state.deepseek = st.deepseek;
   gxCfgPaint();
-  toast('GBIF 的 DeepSeek Key 已加密保存');
+  const label = (st && st.deepseek && st.deepseek.label) || '模型接口';
+  toast(`GBIF 的 Key 已加密保存（${label}）`);
+}
+
+/** 按当前 Key 列出账号真正能用的模型，省得猜名字撞 model_not_found */
+async function gxListModels() {
+  const baseUrl = ($('gxBase') && $('gxBase').value || '').trim();
+  try {
+    const r = await post('/api/ds/models', { baseUrl });
+    if (!r || !r.ok) return toast('取模型列表失败：' + ((r && r.error) || '未知错误'), 4200);
+    if (!r.models.length) return toast('这家接口没返回模型列表，手填即可', 3600);
+    gxModelList(r.models);
+    const head = r.models.slice(0, 6).join(' / ');
+    toast(`这个 Key 能用 ${r.models.length} 个：${head}${r.models.length > 6 ? ' …' : ''}`, 5200);
+  } catch (err) {
+    toast('取模型列表失败：' + (err.message || ''), 4200);
+  }
 }
 
 /**
@@ -10951,10 +11004,15 @@ function bindScore() {
         const st = await post('/api/config', { deepseek: { clear: true } });
         if (st && st.deepseek) S.state.deepseek = st.deepseek;
         gxCfgPaint();
-        toast('已清除 GBIF 的 DeepSeek Key');
+        toast('已清除 GBIF 的模型 Key');
       } catch (e) { toast(e.message || '清除失败'); }
     };
   }
+  // 服务商一换，接口地址 / 默认模型 / 申请入口跟着换；自定义则让用户自己填
+  if ($('gxProvider')) {
+    $('gxProvider').onchange = (e) => gxProviderApply(e.target.value);
+  }
+  if ($('gxModelsBtn')) $('gxModelsBtn').onclick = gxListModels;
   // 内置大陆中文名录：只读状态 + 查名自检（不需要配置）
   if ($('colcnProbeBtn')) $('colcnProbeBtn').onclick = colcnProbe;
   if ($('colcnProbe')) {
