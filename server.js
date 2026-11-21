@@ -36,6 +36,8 @@ const GBIFDS = require('./lib/gbifds');
 const IMG = require('./lib/imgmeta');
 const EX = require('./lib/exif');
 const secure = require('./lib/secure');
+// 模型接口凭据的优先级（用户自填 > 程序内置 > 空）：纯函数，见 lib/ds-creds.js
+const DSC = require('./lib/ds-creds');
 const SEED_CIPHER = require('./lib/seed');
 // 曾经内嵌、现已撤掉的那几把第三方 Key：只留指纹，启动时清一次用户机器上残留的同值
 const SEEDKEYS = require('./lib/seedkeys');
@@ -320,6 +322,49 @@ if (!config.seedKeysPurged) {
 // https://maas-api.unisound.com/v1 就走那边的 deepseek 模型，payload 不用改。
 // 跟站点账号一起加密落在 data/config.json，浏览器端只拿得到 hasApiKey。
 config.deepseek = { apiKey: '', model: 'deepseek-chat', baseUrl: '', ...(config.deepseek || {}) };
+
+/* ---------------- 内嵌的默认模型 Key ----------------
+ * lib/builtin-ds.js 由 tools/seal-ds.js 生成（portable 密文，任何机器能解），
+ * 不进版本库；没生成就是空，一切照旧让用户自己填。
+ * 优先级：用户自己填的 > 内置的。用户清空了自己的 Key 就回落到内置。
+ * 内置值不写进 config.json —— 换新版程序换了 Key，用户那边自动跟着变，
+ * 不会被上一版的旧 Key 卡住。
+ */
+const BUILTIN_DS = (() => {
+  try {
+    const r = secure.open(require('./lib/builtin-ds'));
+    if (r.ok && r.value && String(r.value.apiKey || '').trim()) {
+      return {
+        apiKey: String(r.value.apiKey).trim(),
+        baseUrl: String(r.value.baseUrl || '').trim(),
+        model: String(r.value.model || '').trim(),
+      };
+    }
+  } catch {
+    /* 没内置 Key：正常情况 */
+  }
+  return null;
+})();
+
+/** 当前生效的模型 Key / 地址 / 模型名：用户填的优先，没填用内置，都没有就空串 */
+function dsCreds(explicit = {}) {
+  return DSC.pick({
+    cfg: config.deepseek,
+    builtin: BUILTIN_DS,
+    explicitKey: explicit.apiKey,
+    explicitBase: explicit.baseUrl,
+    explicitModel: explicit.model,
+  });
+}
+const dsKeyOf = (explicit) => dsCreds({ apiKey: explicit }).apiKey;
+const dsBaseOf = (explicit) => dsCreds({ baseUrl: explicit }).baseUrl;
+const dsModelOf = (explicit) => dsCreds({ model: explicit }).model;
+/** 用的是不是内置那一枚（前端据此显示「已内置」而不是「未配置」） */
+function dsUsingBuiltin() {
+  return Boolean(
+    BUILTIN_DS && config.deepseek?.optOutBuiltin !== true && !String(config.deepseek?.apiKey || '').trim(),
+  );
+}
 let sites = new Sites(config);
 
 // 大陆中文名录随程序内置，不需要任何配置，也不写进 config.json。
@@ -2363,7 +2408,8 @@ async function apiDiagExport(body, req) {
     sites: config.sites,
     sessions: config.sessions,
     ui: config.ui,
-    deepseek: config.deepseek,
+    // 交给 diag 的只有「有没有 / 哪个模型 / 哪个域名」，它自己不会再吐明文 Key
+    deepseek: { apiKey: dsKeyOf(), model: dsModelOf(), baseUrl: dsBaseOf() },
     localTaxo: { text: taxoText },
     colcn: { text: colcnText },
     llama: { text: llamaText },
@@ -3637,11 +3683,14 @@ function apiState() {
     },
     // 只回「有没有」，不回明文 Key：GBIF 面板据此决定要不要走模型补中文名
     deepseek: {
-      hasApiKey: Boolean(String(config.deepseek?.apiKey || '').trim()),
-      model: String(config.deepseek?.model || 'deepseek-chat'),
-      baseUrl: String(config.deepseek?.baseUrl || ''),
-      provider: GBIFDS.providerOf(config.deepseek?.baseUrl),
-      label: GBIFDS.providerLabel(config.deepseek?.baseUrl),
+      hasApiKey: Boolean(dsKeyOf()),
+      // builtin=true 表示用的是程序自带的那一枚（作者提供的免费额度），
+      // 前端显示「已内置，可直接用」，用户也可以填自己的 Key 覆盖
+      builtin: dsUsingBuiltin(),
+      model: dsModelOf(),
+      baseUrl: dsBaseOf(),
+      provider: GBIFDS.providerOf(dsBaseOf()),
+      label: GBIFDS.providerLabel(dsBaseOf()),
       // 服务商预设（标签 / base / 默认模型 / 候选模型 / 申请地址）由后端给出，
       // 前端不再各写一份，加一家新的只需要改 lib/gbifds.js
       providers: GBIFDS.PROVIDERS,
@@ -4841,9 +4890,9 @@ async function handleApi(req, res, pathname, q) {
     } catch {
       /* 网络不通就当没拿到，不影响 GBIF 的表 */
     }
-    const dsKey = String(config.deepseek?.apiKey || '').trim();
-    const dsModel = String(config.deepseek?.model || 'deepseek-chat');
-    const dsBase = String(config.deepseek?.baseUrl || '');
+    const dsKey = dsKeyOf();
+    const dsModel = dsModelOf();
+    const dsBase = dsBaseOf();
     const dsLabel = GBIFDS.providerLabel(dsBase);
     let answer = null;
     let warning = '';
@@ -4976,11 +5025,11 @@ async function handleApi(req, res, pathname, q) {
   // 只读，不改配置；body 里可以临时带 baseUrl 试别的服务商，不传就用已存的。
   if (pathname === '/api/ds/models' && req.method === 'POST') {
     const body = await readJson(req).catch(() => ({}));
-    const key = String((body && body.apiKey) || config.deepseek?.apiKey || '').trim();
+    const key = dsKeyOf(body && body.apiKey);
     if (!key) return sendJson(res, 200, { ok: false, error: '还没保存 API Key' });
     const baseUrl = typeof body?.baseUrl === 'string' && body.baseUrl.trim()
       ? body.baseUrl.trim()
-      : String(config.deepseek?.baseUrl || '');
+      : dsBaseOf();
     try {
       const models = await GBIFDS.listModels({ apiKey: key, baseUrl });
       return sendJson(res, 200, { ok: true, models, provider: GBIFDS.providerOf(baseUrl) });
@@ -5037,14 +5086,22 @@ async function handleApi(req, res, pathname, q) {
       const d = body.deepseek;
       const next = { ...(config.deepseek || {}) };
       const k = String(d.apiKey || '').trim();
-      if (k) next.apiKey = k;
+      if (k) {
+        next.apiKey = k;
+        // 填了自己的 Key ＝ 不再用作者的额度
+        next.optOutBuiltin = false;
+      }
       if (typeof d.model === 'string' && d.model.trim()) next.model = d.model.trim();
       // baseUrl 允许清空（回到 DeepSeek 官方）：显式传空串＝重置，不传＝不动
       if (typeof d.baseUrl === 'string') {
         const b = d.baseUrl.trim().replace(/\s+/g, '');
         next.baseUrl = b ? GBIFDS.chatUrl(b).replace(/\/chat\/completions$/i, '') : '';
       }
-      if (d.clear === true) next.apiKey = '';
+      if (d.clear === true) {
+        next.apiKey = '';
+        // 明确关掉：连内置的那一枚也不用，别让人以为「关了」其实还在烧作者的额度
+        next.optOutBuiltin = true;
+      }
       config.deepseek = next;
     }
     persistConfig();

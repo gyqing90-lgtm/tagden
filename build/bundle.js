@@ -67,10 +67,15 @@ const MODULES = [
   'lib/nature-store.js',
   // 内置识别账号（只给识别用）：漏了它，exe 里自然在线识别会报「模块未打包」
   'lib/nat-share.js',
+  // 内嵌的默认模型 Key（可选）：由 tools/seal-ds.js 生成，不在版本库里。
+  // 没配就跳过，server.js 那边用 try/catch 兜住，走「让用户自己填」的老路子。
+  'lib/builtin-ds.js',
   // 从聚合台并进来的两个查询模块：nature.js 查「某属在本地名录里有哪些种」，
   // gbifds.js 查「某属在 GBIF 本地区有哪些种」。都随结果页的学名小标一起用。
   'lib/nature.js',
   'lib/gbifds.js',
+  // 模型接口凭据优先级（用户自填 / 内置 Key）：漏了它，exe 启动就报「模块未打包」
+  'lib/ds-creds.js',
   // 照片评分（内置）：store 会 require '../public/score-engine.js'，这一份也必须列进来
   'lib/score-store.js',
   'lib/score-ai.js',
@@ -78,6 +83,12 @@ const MODULES = [
   // 内置本地大模型运行库（llama.cpp）：漏了它，exe 启动时会报「模块未打包」
   'lib/llama.js',
 ];
+
+/**
+ * 可选模块：文件不在就当没有，不影响打包。
+ * 目前只有内置模型 Key（lib/builtin-ds.js，gitignore，由 tools/seal-ds.js 生成）。
+ */
+const OPTIONAL_MODULES = new Set(['lib/builtin-ds.js']);
 
 /** 文本资源：按 utf8 内联成字符串 */
 const ASSETS = ['index.html', 'style.css', 'app.js', 'score-engine.js', 'score-worker.js'];
@@ -106,7 +117,11 @@ const VENDOR_BIN = [{ rel: 'vendor/llama/llama-win-cpu-x64.zip', key: 'llama-win
 const SEA_ASSETS = VENDOR_BIN.filter((v) => v.sea);
 
 function buildBundle(root, meta = {}) {
-  const mods = MODULES.map((rel) => {
+  const mods = MODULES.filter((rel) => {
+    // 可选模块（内置模型 Key）不存在就跳过，别的缺了照旧在 readFileSync 处炸出来
+    if (OPTIONAL_MODULES.has(rel) && !fs.existsSync(path.join(root, rel))) return false;
+    return true;
+  }).map((rel) => {
     const code = fs.readFileSync(path.join(root, rel), 'utf8');
     return `__mods[${JSON.stringify(rel)}] = function (module, exports, require) {\n${code}\n};`;
   }).join('\n\n');

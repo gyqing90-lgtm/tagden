@@ -10208,8 +10208,20 @@ function gxCfgPaint() {
   const { d, providers } = gxProviders();
   if ($('gxKey')) $('gxKey').value = '';
   if ($('gxKeyHint')) {
-    $('gxKeyHint').textContent = d.hasApiKey ? '已配置（留空即不改动）' : '未配置';
+    // builtin：程序自带一枚免费额度的 Key（作者提供），用户什么都不用填就能用
+    const builtin = d.builtin === true;
+    $('gxKeyHint').textContent = builtin
+      ? '已内置，可直接用'
+      : d.hasApiKey
+        ? '已配置（留空即不改动）'
+        : '未配置';
     $('gxKeyHint').style.color = d.hasApiKey ? 'var(--green-d)' : 'var(--ink-3)';
+  }
+  if ($('gxKey')) {
+    $('gxKey').placeholder = d.builtin ? '已内置（想用自己的就填在这里，覆盖内置）' : 'sk-…（已配置就留空）';
+  }
+  if ($('gxKeyClear')) {
+    $('gxKeyClear').textContent = d.builtin ? '清除内置 Key（不再用模型补名）' : '清除 GBIF 的 Key';
   }
   // 存的是哪家就选哪家；认不出来的地址归到「自定义接口」
   const pid = providers[d.provider] ? d.provider : d.baseUrl ? 'custom' : 'deepseek';
@@ -10222,14 +10234,23 @@ function gxCfgPaint() {
     $('gxApply').href = conf.apply;
     $('gxApply').textContent = conf.apply.replace(/^https?:\/\//, '').replace(/\/$/, '');
   }
-  if ($('gxApplyWrap')) $('gxApplyWrap').hidden = pid === 'custom';
+  if ($('gxBuiltinNote')) $('gxBuiltinNote').hidden = d.builtin !== true;
+  if ($('gxApplyWrap')) $('gxApplyWrap').hidden = pid === 'custom' || d.builtin === true;
 }
 
 async function gxKeySave() {
   const key = ($('gxKey') && $('gxKey').value || '').trim();
   const model = ($('gxModel') && $('gxModel').value || '').trim();
   const baseUrl = ($('gxBase') && $('gxBase').value || '').trim();
-  if (!key && !model && !baseUrl) return;
+  const cur = S.state.deepseek || {};
+  // 打开面板什么都没动就别提交：地址和模型本来就是后端算好的「当前生效值」（可能是内置的），
+  // 一提交就等于把内置服务商固化进 config.json，以后作者换 Key 换了服务商，老用户反而卡在旧地址上
+  const changed = Boolean(key) || (model && model !== (cur.model || '')) || (baseUrl && baseUrl !== (cur.baseUrl || ''));
+  if (!changed) {
+    gxCfgPaint();
+    toast(cur.builtin ? '内置 Key 已经在用，没改就不动' : '没有改动');
+    return;
+  }
   const st = await post('/api/config', { deepseek: { apiKey: key, model, baseUrl } });
   if (st && st.deepseek) S.state.deepseek = st.deepseek;
   gxCfgPaint();
@@ -11001,10 +11022,11 @@ function bindScore() {
   if ($('gxKeyClear')) {
     $('gxKeyClear').onclick = async () => {
       try {
+        const wasBuiltin = S.state.deepseek && S.state.deepseek.builtin === true;
         const st = await post('/api/config', { deepseek: { clear: true } });
         if (st && st.deepseek) S.state.deepseek = st.deepseek;
         gxCfgPaint();
-        toast('已清除 GBIF 的模型 Key');
+        toast(wasBuiltin ? '已关闭模型补名，内置 Key 也不再使用' : '已清除 GBIF 的模型 Key');
       } catch (e) { toast(e.message || '清除失败'); }
     };
   }

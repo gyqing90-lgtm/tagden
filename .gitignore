@@ -3,6 +3,8 @@ data/
 data-tagden/
 # 内嵌默认账号的密文：配合 lib/secure.js 的主密钥可解出真实账号，不进版本库
 lib/seed.js
+# 内嵌的默认模型 Key（云知声 MaaS）：明文写进 server.js 会跟着仓库上 GitHub，这里只放密文
+lib/builtin-ds.js
 oss.config.json
 .cache/
 .probe/
