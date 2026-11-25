@@ -132,17 +132,14 @@
             <button id="selNone" class="ghost">清空</button>
             <button id="undoBtn" class="ghost" hidden title="撤销上一次本机写标签 / 重命名">撤销</button>
           </div>
-          <details class="more-tools">
-            <summary class="ghost mini">更多</summary>
-            <div class="more-menu">
-              <button id="exportBtn" class="ghost" title="导出带拍摄时间和经纬度的标注明细、物种清单">导出清单</button>
-              <button id="dwcBtn" class="ghost" title="Darwin Core 标准格式：occurrence.txt + taxon.txt + meta.xml，打成 zip 可直接导进 GBIF 或交给合作单位">Darwin Core</button>
-              <button id="toScoreBtn" class="ghost" title="给当前这个文件夹的照片打技术分，按星级挑片，可再送去标注或传到自然在线">照片评分</button>
-              <button id="nameCheckBtn" class="ghost" title="只有中文名或只有学名的照片，用内置《中国生物物种名录》把另一侧补齐；确认后才写回">物种名核对</button>
-              <button id="pasteBtn" class="ghost" title="不用打开文件夹：Ctrl+V 粘贴一张图、或直接拖进来，立刻看多站识别结果">粘贴单图识别</button>
-              <button id="tagBatchBtn" class="ghost" hidden title="相册端批量鉴定：对勾选的照片统一赋一个名字，一次写回自然在线（只传鉴定结果，不传图片）">批量鉴定</button>
-            </div>
-          </details>
+          <div class="tool-group more-tools">
+            <button id="exportBtn" class="ghost" title="导出带拍摄时间和经纬度的标注明细、物种清单">导出清单</button>
+            <button id="dwcBtn" class="ghost" title="Darwin Core 标准格式：occurrence.txt + taxon.txt + meta.xml，打成 zip 可直接导进 GBIF 或交给合作单位">Darwin Core</button>
+            <button id="toScoreBtn" class="ghost" title="给当前这个文件夹的照片打技术分，按星级挑片，可再送去标注或传到自然在线">照片评分</button>
+            <button id="nameCheckBtn" class="ghost" title="只有中文名或只有学名的照片，用内置《中国生物物种名录》把另一侧补齐；确认后才写回">物种名核对</button>
+            <button id="pasteBtn" class="ghost" title="不用打开文件夹：Ctrl+V 粘贴一张图、或直接拖进来，立刻看多站识别结果">粘贴单图识别</button>
+            <button id="tagBatchBtn" class="ghost" hidden title="相册端批量鉴定：对勾选的照片统一赋一个名字，一次写回自然在线（只传鉴定结果，不传图片）">批量鉴定</button>
+          </div>
           <button id="runBtn" class="primary" title="识别勾选的照片；在照片区按住鼠标拖出方框可批量框选">识别选中 <b id="selCount">0</b></button>
         </div>
       </div>

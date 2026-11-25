@@ -2450,48 +2450,23 @@ body.src-album #dockAnnotate .crumbs { display: none; }
   overflow: hidden;
   text-overflow: ellipsis;
 }
-/* 「更多」原地展开会给控件区加一百多像素，左栏放不下时最后一项会被裁掉：
-   只在展开期间让控件区收缩并自己滚（平时仍是 flex:0 0 auto，绝不压缩按钮）。 */
-.rail-dock:has(.more-tools[open]) {
-  flex: 0 1 auto;
-  overflow-y: auto;
+/* 原来藏在「更多」里的六个功能，左栏不再折叠：直接两列铺开，跟上面的筛选条对齐，
+   既没有「更多」字样也没有三角，少一次点击 */
+.rail-dock .more-tools {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
 }
-
-/* 「更多」在主区是个浮层，在窄栏里会被 overflow 裁掉一半 → 改成原地展开 */
-.rail-dock .more-tools { grid-column: 1 / -1; display: block; }
-.rail-dock .more-tools > summary { justify-content: center; }
-.rail-dock .more-menu {
-  position: static;
-  width: auto;
-  margin-top: 5px;
-  padding: 4px;
+.rail-dock .more-tools > button {
+  min-width: 0;
+  flex: 0 0 auto;
   border: 1px solid var(--line);
-  border-radius: 8px;
-  box-shadow: none;
-  background: var(--bg);
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
+  border-radius: 6px;
+  text-align: center;
 }
-.rail-dock .more-menu button { width: 100%; text-align: left; }
-
-/* 「更多」在主区是个浮层，在窄栏里会被 overflow 裁掉一半 → 改成原地展开 */
-.rail-dock .more-tools { grid-column: 1 / -1; display: block; }
-.rail-dock .more-tools > summary { justify-content: center; }
-.rail-dock .more-menu {
-  position: static;
-  width: auto;
-  margin-top: 5px;
-  padding: 4px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  box-shadow: none;
-  background: var(--bg);
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-.rail-dock .more-menu button { width: 100%; text-align: left; }
+/* 主操作跟着两列块的宽度走，不再缩成左下角一小截 */
+.rail-dock .tools > #runBtn { grid-column: 1 / -1; justify-content: center; }
 /* 统计页：路径 + 重新统计 */
 .rail-dock .st-bar {
   flex-wrap: wrap;
@@ -3742,44 +3717,7 @@ html, body {
   border-left: 1px solid var(--line);
   flex-wrap: wrap;
 }
-.tool-group > button[hidden], .more-menu button[hidden] { display: none !important; }
-
-.more-tools { position: relative; display: inline-flex; }
-.more-tools > summary {
-  list-style: none;
-  user-select: none;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-}
-.more-tools > summary::-webkit-details-marker { display: none; }
-.more-tools > summary::after { content: "▾"; font-size: 10px; opacity: .7; }
-.more-tools[open] > summary { background: var(--green-l); color: var(--green-d); border-color: #cfe0d4; }
-.more-menu {
-  position: absolute;
-  top: calc(100% + 7px);
-  right: 0;
-  z-index: 70;
-  min-width: 176px;
-  padding: 6px;
-  background: var(--card);
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  box-shadow: 0 16px 36px rgba(31, 42, 34, .16);
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-.more-menu button {
-  justify-content: flex-start;
-  text-align: left;
-  width: 100%;
-  border: 0;
-  background: transparent;
-  padding: 7px 9px;
-  border-radius: 7px;
-}
-.more-menu button:hover { background: var(--green-l); color: var(--green-d); }
+.tool-group > button[hidden] { display: none !important; }
 
 .ghost {
   border: 1px solid var(--line);
@@ -3977,7 +3915,6 @@ html[data-theme="dark"] .card,
 html[data-theme="dark"] .st-card,
 html[data-theme="dark"] .sheet,
 html[data-theme="dark"] .name-edit,
-html[data-theme="dark"] .more-menu,
 html[data-theme="dark"] .engine-wrap .chips,
 html[data-theme="dark"] .sc-cmp-pane,
 html[data-theme="dark"] .lib-dup-item,
@@ -4152,7 +4089,7 @@ html[data-theme="dark"] .zoom-mask { background: rgba(0,0,0,.94); }
   animation: tagden-view-in .18s ease both;
 }
 @keyframes tagden-view-in { from { opacity: .3; transform: translateY(3px); } to { opacity: 1; transform: none; } }
-.more-menu, .engine-wrap .chips { animation: tagden-pop .14s ease both; }
+.engine-wrap .chips { animation: tagden-pop .14s ease both; }
 @keyframes tagden-pop { from { opacity: 0; transform: translateY(-4px) scale(.99); } to { opacity: 1; transform: none; } }
 .card.sel .tick { animation: tagden-tick .16s ease; }
 @keyframes tagden-tick { 0% { transform: scale(.7); } 100% { transform: scale(1); } }
@@ -4246,7 +4183,6 @@ html[data-theme="dark"] .zoom-mask { background: rgba(0,0,0,.94); }
   .st-summary-cards { grid-template-columns: repeat(2, minmax(88px, 1fr)); }
   .toolbar { align-items: flex-start; }
   .tools { width: 100%; }
-  .more-tools { margin-left: auto; }
 }
 
 .thumb:has(img.loaded)::before { display: none; }
