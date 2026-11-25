@@ -1221,11 +1221,28 @@ function updateFilterCounts() {
 }
 
 function updateDirStat() {
+  const alb = S.mode === 'album';
   const parts = [];
-  if (S.dirs.length) parts.push(`${S.dirs.length} 个文件夹`);
-  parts.push(`${S.files.length} 张`, `已标注 ${S.labels.size}`);
-  if (S.pending.size) parts.push(`读取标签 ${S.scanDone}/${S.files.length}`);
+  if (alb) {
+    // 相册没有子文件夹、也没有「本机标签」这回事，只报张数
+    parts.push(`${S.files.length} 张`);
+  } else {
+    if (S.dirs.length) parts.push(`${S.dirs.length} 个文件夹`);
+    parts.push(`${S.files.length} 张`, `已标注 ${S.labels.size}`);
+    if (S.pending.size) parts.push(`读取标签 ${S.scanDone}/${S.files.length}`);
+  }
   $('dirStat').textContent = parts.join(' · ');
+  // 路径栏也跟着数据源走：相册端报相册名，本机端报文件夹
+  if (alb) {
+    const t = (NAT.album && (NAT.album.title || NAT.album.id)) || '';
+    $('curPath').textContent = t ? `相册：${t}` : '相册端 · 还没选相册';
+    $('curPath').title = t || '在左栏「自然在线相册」里点一个，或到「自然在线」页登录后新建';
+  } else if (S.dir) {
+    $('curPath').textContent = shortenPath(S.dir);
+    $('curPath').title = S.dir;
+  }
+  // 相册没有层级，没有「上一级」可返回
+  if ($('upBtn')) $('upBtn').hidden = alb;
   updateFilterCounts();
 }
 
@@ -5033,7 +5050,7 @@ function syncSrcAvailability(tab) {
       b.title = off
         ? natLock
           ? '自然在线页右边已有相册列表，左栏相册端在这里不用切；左栏用来选本机文件夹'
-          : '统计分析 / 按分类归档只处理本机文件夹，相册端在这里不可用'
+          : '统计分析 / 按分类归档 / 图库管理只处理本机文件夹，相册端在这里不可用'
         : b.dataset.src === 'album' ? '照片来自自然在线账号里的相册' : '照片来自本机文件夹';
     }
   }
@@ -5583,7 +5600,11 @@ function showTab(name) {
   closeDrawers();
   syncDrawerButtons(name);
   // 归档 / 统计 / 自然在线页：进页面就回到本机端（切走后不会自动跳回相册端）
-  if (syncSrcAvailability(name) && S.mode === 'album') setSource('local', { quiet: true });
+  if (syncSrcAvailability(name) && S.mode === 'album') {
+    setSource('local', { quiet: true });
+    // 别无声无息地跳回去，让人以为按钮坏了
+    toast('统计分析 / 按分类归档 / 图库管理只处理本机文件夹，已切回本机端', 3200);
+  }
   const lay = document.querySelector('.layout');
   const views = {
     annotate: $('browseView'),
@@ -6752,6 +6773,7 @@ async function enterAlbumMode() {
     S.sel.clear();
     S.active = null;
     renderAlbum();
+    updateDirStat();
   }
 }
 
@@ -6788,6 +6810,7 @@ async function loadAlbumPhotos() {
   }
   S.files = NAT.photos.map(natPhotoAsFile);
   renderAlbum();
+  updateDirStat();
   scAlbumSync();
 }
 
@@ -7039,7 +7062,7 @@ async function setSource(mode, opts = {}) {
     toast(
       S.tab === 'nature'
         ? '自然在线页右边就是相册列表，直接点右边的相册看照片；左栏留给本机文件夹'
-        : '统计分析 / 按分类归档只处理本机文件夹，相册端在这里不可用',
+        : '统计分析 / 按分类归档 / 图库管理只处理本机文件夹，相册端在这里不可用',
       3200,
     );
     return;
@@ -7093,6 +7116,7 @@ async function setSource(mode, opts = {}) {
   syncNatSideUI(S.tab === 'nature');
   if (S.tab === 'score') scoreOpen();
   updateCount();
+  updateDirStat();
   if (!opts.quiet) toast(alb ? '已切到相册端：照片来自自然在线账号' : '已切回本机端', 2000);
 }
 
@@ -9591,7 +9615,7 @@ async function scLoadAlbum() {
   SCR.invalid = 0;
   SCR.sel.clear();
   if ($('scDir')) {
-    $('scDir').textContent = album ? `当前相册：${album.title || album.id}` : '当前相册：—';
+    $('scDir').textContent = album ? `当前相册：${album.title || album.id}` : '相册端 · 还没选相册';
     $('scDir').title = album ? String(album.title || album.id) : '先在左栏选一个自然在线相册';
   }
   if ($('scDirs')) $('scDirs').hidden = true;
