@@ -2467,6 +2467,9 @@ body.src-album #dockAnnotate .crumbs { display: none; }
 }
 /* 主操作跟着两列块的宽度走，不再缩成左下角一小截 */
 .rail-dock .tools > #runBtn { grid-column: 1 / -1; justify-content: center; }
+/* 两列里按钮是奇数个时，最后一个跨两列（JS 打 data-wide），右边不再留空格子 */
+#filterSeg > [data-wide],
+.rail-dock .more-tools > [data-wide] { grid-column: 1 / -1; }
 /* 统计页：路径 + 重新统计 */
 .rail-dock .st-bar {
   flex-wrap: wrap;

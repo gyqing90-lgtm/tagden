@@ -365,8 +365,7 @@ async function boot() {
   bindTabs();
   // 首屏就是标注页：停靠槽要跟着初始化，否则第一次进来左栏底部是空的
   syncRailDocks(S.tab || 'annotate');
-  // 首屏就是标注页：停靠槽要跟着初始化，否则第一次进来左栏底部是空的
-  syncRailDocks(S.tab || 'annotate');
+  balanceRailGrids();
   bindNature();
   bindScore();
   bindLibrary();
@@ -5623,6 +5622,18 @@ function syncRailDocks(name) {
   }
 }
 
+/* 左栏的两列网格（筛选条、「更多」那六项）里，落单的最后一个按钮会空出右边一格。
+   数一下还能看见的按钮，是奇数就让最后一个整行铺开，两列块永远齐边。 */
+function balanceRailGrids() {
+  const boxes = [$('filterSeg'), ...document.querySelectorAll('.rail-dock .more-tools')];
+  for (const box of boxes) {
+    if (!box) continue;
+    box.querySelectorAll('[data-wide]').forEach((el) => el.removeAttribute('data-wide'));
+    const vis = [...box.children].filter((el) => el.nodeType === 1 && !el.hidden);
+    if (vis.length % 2 === 1) vis[vis.length - 1].setAttribute('data-wide', '1');
+  }
+}
+
 function showTab(name) {
   S.tab = name;
   closeDrawers();
@@ -7126,6 +7137,8 @@ async function setSource(mode, opts = {}) {
   if ($('selAll')) $('selAll').textContent = alb ? '全选本页' : S.filter === 'nolatin' ? '全选没有学名' : '全选未标注';
   // 批量鉴定只在相册端出现（本机端没有「写回站点鉴定」这回事）
   if ($('tagBatchBtn')) $('tagBatchBtn').hidden = !alb;
+  // 显隐变过之后重新数一遍：落单的那个按钮整行铺开，别在右边空一格
+  balanceRailGrids();
   if (alb) {
     // 先按同步路径清空网格：相册没登录 / 没选相册时，上一个本机文件夹的卡片
     // 会一直挂在照片区（左栏已经写着「0 张」），看着像没切过来
