@@ -276,6 +276,8 @@ function bindRailCollapse() {
   if ($('railFold')) $('railFold').onclick = () => setRailCollapsed(true);
   if ($('railExpand')) $('railExpand').onclick = () => setRailCollapsed(false);
   window.addEventListener('resize', () => { if (drawerNarrow()) setRailCollapsed(false); });
+  // 左栏高度变了，相册区要重新对齐到本机端同一个下沿
+  window.addEventListener('resize', syncAlbumZoneHeight);
 }
 
 function drawerNarrow() {
@@ -800,6 +802,7 @@ function renderTree() {
   for (const p of T.open) {
     if (!T.kids.has(p) && !T.loading.has(p)) treeKids(p);
   }
+  syncAlbumZoneHeight();
 }
 
 /** 展开 / 折叠一个节点（只动树，不动中间的图片） */
@@ -1218,6 +1221,31 @@ function updateFilterCounts() {
   let n = 0;
   for (const f of S.files) if (!hasLatinName(f)) n += 1;
   el.textContent = String(n);
+}
+
+/**
+ * 相册端的「列表区」要和本机端对齐：本机端那块是「路径框 + 快捷位置 + 树(33%)」，
+ * 相册端没有前两块，光按 33% 算会比本机端短一截（约 75px），两个黄框看着就不一样高。
+ *
+ * 不写死那 75px：直接量「本机端路径框顶 → 树底」这一段，写进 --rail-album-h。
+ * 相册端量不到（树藏着），沿用上次的值；窗口变化时重新量。
+ */
+let albumZoneExtra = 0; // 路径框 + 快捷位置 + 树的上边距：相册端没有这些，但要算进同一段高度
+
+function syncAlbumZoneHeight() {
+  const rail = $('rail');
+  const tree = $('tree');
+  const pathInput = $('pathInput');
+  if (!rail || !tree || !pathInput) return;
+  const pathbox = pathInput.closest('.pathbox');
+  if (!pathbox) return;
+  const t = tree.getBoundingClientRect();
+  // 树visible时量出「树以外」那一段（路径框 + 快捷位置）；相册端树是 0 高，沿用上次的值
+  if (t.height > 120) albumZoneExtra = Math.round(t.bottom - pathbox.getBoundingClientRect().top - t.height);
+  if (!albumZoneExtra) return;
+  // 树的定高是 `flex: 0 0 33%`，所以相册区 = 33% 左栏高 + 那一段
+  const h = Math.round(rail.clientHeight * 0.33) + albumZoneExtra;
+  document.documentElement.style.setProperty('--rail-album-h', `${h}px`);
 }
 
 function updateDirStat() {
@@ -7128,6 +7156,7 @@ async function setSource(mode, opts = {}) {
   NAT.side = alb ? 'album' : 'local';
   syncNatSideUI(S.tab === 'nature');
   if (S.tab === 'score') scoreOpen();
+  syncAlbumZoneHeight();
   updateCount();
   updateDirStat();
   if (!opts.quiet) toast(alb ? '已切到相册端：照片来自自然在线账号' : '已切回本机端', 2000);

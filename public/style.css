@@ -3202,7 +3202,10 @@ body.src-album #dockAnnotate .tool-group > * { flex: 1 1 0; min-width: 0; }
    标题 + 列表一起算，列表自己滚，剩下的高度留给下面的控件，六页一致。 */
 .album-zone {
   flex: 0 0 auto;
-  height: 33%;
+  /* 本机端那块是「路径框 + 快捷位置 + 树(33%)」，相册端没有前两块，
+     所以这里用 JS 量出来的同一段高度（--rail-album-h），两个黄框才一样高。
+     还没量到时退回 33% + 路径框/快捷位置的常规高度。 */
+  height: var(--rail-album-h, calc(33% + 75px));
   min-height: 0;
   display: flex;
   flex-direction: column;
