@@ -2319,6 +2319,253 @@ html[data-theme="dark"] {
 .sc-actrow > select { flex: 0 0 auto; }
 .sc-aichk { white-space: nowrap; }
 
+/* ---------- 评分控件搬进左栏后的排版 ----------
+   三行原本是「整条横幅横排」，左栏只有 288px，横排会横向溢出。
+   这里统一改成网格：按钮按 3 列铺，标签和 select 各自占满一行。
+   面板限高 56%，内容再多就在面板内滚动，文件树至少留出能点的高度。 */
+.rail-score {
+  /* 树固定占 1/3，剩下的高度全归控件；内容再多也是面板自己滚 */
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: none;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px 9px;
+  background: var(--card);
+  border-top: 1px solid var(--line);
+}
+/* .rail 是 flex 容器，[hidden] 会被 display:flex 顶掉，必须显式压 */
+.rail-score[hidden] { display: none !important; }
+/* 里面的小标签（已选 N 张、剩余时间等）JS 会给 hidden，别让 inline-flex 把它顶出来 */
+.rail-score [hidden] { display: none !important; }
+.rail-score .sc-bar,
+.rail-score .sc-airow,
+.rail-score .sc-actrow {
+  display: grid;
+  gap: 4px;
+  padding: 0;
+  background: none;
+  border: 0;
+  font-size: 11.5px;
+}
+/* auto-fit：左栏拖宽一点，按钮自动多排一列，面板就矮一截 */
+.rail-score .sc-bar { grid-template-columns: repeat(auto-fit, minmax(84px, 1fr)); }
+.rail-score .sc-airow { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
+/* 动作行固定两列：摘要一行，下面「本机端 / AI 判别选中」并排 */
+.rail-score .sc-actrow { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+/* 主区那条「子项一律不压缩」在这里会顶出横向滚动，放开 */
+.rail-score .sc-bar > *,
+.rail-score .sc-airow > *,
+.rail-score .sc-actrow > * {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.rail-score .nat-gap { display: none; }
+.rail-score .sc-dir,
+.rail-score #scSelInfo,
+.rail-score #scAiModel,
+.rail-score #scSummary,
+.rail-score .sc-fml { grid-column: 1 / -1; }
+/* 评分摘要本来就长，在 132px 里会折成四五行，两行封顶 */
+.rail-score #scSummary {
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.rail-score .sc-dir {
+  max-width: 100%;
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: normal;
+  word-break: break-all;
+}
+.rail-score .chk-inline {
+  gap: 3px;
+  line-height: 1.3;
+  font-size: 10.5px;
+  color: var(--ink-3);
+}
+/* 标签和下拉挤一行：下拉吃掉剩下的宽度，文字太长就自己省略 */
+.rail-score .chk-inline select { flex: 0 1 auto; min-width: 0; width: auto; max-width: calc(100% - 30px); }
+.rail-score .sc-quick-strict { justify-content: flex-start; }
+.rail-score select {
+  height: 23px;
+  font-size: 11px;
+  max-width: 100%;
+  text-overflow: ellipsis;
+}
+.rail-score .ghost,
+.rail-score .primary {
+  font-size: 11px;
+  /* .mini 的 min-height:28px 会顶住压缩，这里显式放小，否则每行都是 28 */
+  min-height: 21px;
+  padding: 1px 5px;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rail-score #scRunBtn { font-weight: 700; }
+.rail-score .sc-aist { font-size: 10.5px; white-space: normal; line-height: 1.25; }
+.rail-score .sc-fml { font-size: 10px; color: var(--ink-3); }
+/* 左栏窄，综合分公式这种常驻说明先让位；排序下拉的 tooltip 里还有一份 */
+@media (max-height: 780px) { .rail-score .sc-fml { display: none; } }
+/* 没勾照片时这块是空 span，会白占一整行 */
+.rail-score #scSelInfo:empty { display: none; }
+/* 标题条：右侧一个「收起」，收起后高度全给文件夹树 */
+.rail-score-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 4px;
+  margin-bottom: 2px;
+  border-bottom: 1px dashed var(--line);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .5px;
+  color: var(--ink-3);
+}
+.rail-score-head button {
+  border: 0;
+  background: none;
+  color: var(--ink-3);
+  font-size: 10.5px;
+  padding: 2px 5px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.rail-score-head button:hover { color: var(--green); background: var(--line-soft); }
+/* 收起：只留「当前文件夹 + 开始评分」，其余全藏，树拿回高度 */
+.rail-score.folded .sc-airow,
+.rail-score.folded .sc-actrow { display: none; }
+.rail-score.folded .sc-bar > *:not(.sc-dir):not(#scRunBtn) { display: none; }
+.rail-score.folded #scRunBtn { grid-column: 1 / -1; padding: 5px 8px; }
+/* 收起后按内容高度，别把剩下的一大片空白也涂成面板 */
+.rail-score.folded { flex: 0 0 auto; }
+
+/* ---------- 左栏底部停靠槽：各页顶部的控制条 ----------
+   和评分面板同一套思路：树在上，控制在下，主区整块让给内容。
+   原来的控制条是横排一整条，进了 288px 的窄列必须换成网格。 */
+.rail-dock {
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: none;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 9px 10px 10px;
+  background: var(--card);
+  border-top: 1px solid var(--line);
+}
+.rail-dock[hidden] { display: none !important; }
+.rail-dock [hidden] { display: none !important; }
+.rail-dock > * { min-width: 0; }
+/* 标注 / 归档共用的 .toolbar */
+.rail-dock .toolbar {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+}
+.rail-dock .crumbs { flex: 1 1 auto; gap: 5px; }
+.rail-dock .crumbs span { font-size: 11px; white-space: normal; word-break: break-all; }
+.rail-dock .tools {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(84px, 1fr));
+  gap: 5px;
+  flex-wrap: nowrap;
+}
+.rail-dock .tools > * { min-width: 0; flex: 0 1 auto; }
+.rail-dock .tools > .seg,
+.rail-dock .tools > .destbox { grid-column: 1 / -1; }
+.rail-dock .seg { flex-wrap: wrap; }
+.rail-dock .seg button { font-size: 11px; padding: 3px 5px; flex: 1 1 auto; }
+.rail-dock .destbox { display: flex; gap: 4px; width: auto; }
+.rail-dock .destbox input { flex: 1 1 auto; min-width: 0; width: auto; font-size: 11px; padding: 4px 6px; }
+.rail-dock .ghost,
+.rail-dock .primary {
+  font-size: 11px;
+  min-height: 21px;
+  padding: 1px 5px;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* 「更多」在主区是个浮层，在窄栏里会被 overflow 裁掉一半 → 改成原地展开 */
+.rail-dock .more-tools { grid-column: 1 / -1; display: block; }
+.rail-dock .more-tools > summary { justify-content: center; }
+.rail-dock .more-menu {
+  position: static;
+  width: auto;
+  margin-top: 5px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: none;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.rail-dock .more-menu button { width: 100%; text-align: left; }
+
+/* 「更多」在主区是个浮层，在窄栏里会被 overflow 裁掉一半 → 改成原地展开 */
+.rail-dock .more-tools { grid-column: 1 / -1; display: block; }
+.rail-dock .more-tools > summary { justify-content: center; }
+.rail-dock .more-menu {
+  position: static;
+  width: auto;
+  margin-top: 5px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: none;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.rail-dock .more-menu button { width: 100%; text-align: left; }
+
+/* 统计页：路径 + 重新统计 */
+.rail-dock .st-bar {
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: 11px;
+}
+.rail-dock .st-bar .muted { flex: 1 1 100%; }
+/* 自然在线：登录框、上传按钮竖着排 */
+.rail-dock .nat-bar {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+}
+.rail-dock .nat-bar .nat-gap { display: none; }
+.rail-dock .nat-login { flex-wrap: wrap; gap: 4px; }
+.rail-dock .nat-login input { flex: 1 1 100%; min-width: 0; font-size: 11px; padding: 4px 6px; }
+.rail-dock .nat-cap { width: 84px; height: auto; }
+.rail-dock .nat-who { font-size: 11px; }
+/* 图库管理：根目录输入 + 建索引 */
+.rail-dock .lib-bar { gap: 5px; margin: 0; }
+.rail-dock .lib-bar input { flex: 1 1 100%; min-width: 0; font-size: 11px; padding: 5px 7px; }
+
+/* 树在上、控件在下：树固定占左栏高度的 1/3，剩下全给控件（空着也没关系） */
+.rail > .tree { flex: 0 0 33%; min-height: 0; }
+
 .sc-card .thumb { background: var(--line-soft); }
 .sc-star {
   position: absolute;
@@ -3011,6 +3258,30 @@ html[data-theme="dark"] {
 /* ---------- 左栏「本机端 / 相册端」切换（从右栏工具条挪过来的） ----------
  * 放在左栏最顶部，占满宽度做成两个大 tab；下面再接「文件夹」或「自然在线相册」。
  * 之前放在 .tools 里，窗口一窄就被挤到几十像素宽、中文变成竖排。 */
+.rail-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 10px 4px;
+  flex: 0 0 auto;
+}
+/* 左栏总高不够时，别让「桌面/图片/下载/文档」这排被压成一条缝 */
+.rail > .pathbox,
+.rail > .places { flex: 0 0 auto; }
+/* 左栏总高不够时，别让「桌面/图片/下载/文档」这排被压成一条缝 */
+.rail > .pathbox,
+.rail > .places { flex: 0 0 auto; }
+.rail-top .rail-src { padding: 0; flex: 1 1 auto; min-width: 0; }
+/* 「文件夹 ↻」缩成右侧的一小截，不再单独占一行 */
+.rail-top #railHeadFiles {
+  padding: 0;
+  flex: 0 0 auto;
+  gap: 2px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0;
+  color: var(--ink-3);
+}
 .rail-src { padding: 10px 10px 2px; flex: 0 0 auto; }
 .rail-src .seg { width: 100%; }
 .rail-src .seg button { flex: 1 1 0; text-align: center; padding: 7px 8px; font-size: 12.5px; white-space: nowrap; }

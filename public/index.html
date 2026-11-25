@@ -55,19 +55,180 @@
 
   <aside class="rail" id="rail">
     <!-- 本机端 / 相册端：放在左栏顶部，和下面的「文件夹 / 自然在线相册」列表配套 -->
-    <div class="rail-src">
-      <div class="seg" id="srcSeg" title="照片从哪来：本机文件夹，还是自然在线账号里的相册。相册端可以批量识别、看各站置信度、挑候选写入鉴定">
-        <button data-src="local" class="on">本机端</button>
-        <button data-src="album">相册端</button>
+    <!-- 本机端 / 相册端 和「文件夹 ↻」并成一行：左栏要腾出高度给下面的评分面板 -->
+    <div class="rail-top">
+      <div class="rail-src">
+        <div class="seg" id="srcSeg" title="照片从哪来：本机文件夹，还是自然在线账号里的相册。相册端可以批量识别、看各站置信度、挑候选写入鉴定">
+          <button data-src="local" class="on">本机端</button>
+          <button data-src="album">相册端</button>
+        </div>
       </div>
+      <div class="rail-head" id="railHeadFiles">文件夹<button id="treeRefresh" class="rail-refresh" title="重新读取磁盘和文件夹（新插的 U 盘、刚建的文件夹）">↻</button></div>
     </div>
-    <div class="rail-head" id="railHeadFiles">文件夹<button id="treeRefresh" class="rail-refresh" title="重新读取磁盘和文件夹（新插的 U 盘、刚建的文件夹）">↻</button></div>
     <div class="pathbox">
       <input id="pathInput" type="text" spellcheck="false" placeholder="粘贴完整路径，回车进入">
       <button id="goBtn" title="进入">↵</button>
     </div>
     <div id="places" class="places"></div>
     <div id="tree" class="tree"></div>
+
+    <!-- 评分控件：从主区搬进左栏，摆在文件夹树下面 -->
+    <div id="railScore" class="rail-score" hidden>
+      <div class="rail-score-head">
+        <span>评分设置</span>
+        <button id="railScoreFold" type="button" title="收起评分设置，把高度让给上面的文件夹树">收起 ◂</button>
+      </div>
+      <div class="sc-bar">
+        <span class="sc-dir" id="scDir" title="评分对象就是左边选中的文件夹">当前文件夹：—</span>
+        <span class="nat-gap"></span>
+        <select id="scStarSel" class="nat-sel" title="按星级筛选">
+          <option value="">全部星级</option>
+          <option value="3">★★★ 优选</option>
+          <option value="2">★★ 良好</option>
+          <option value="1">★ 可留</option>
+          <option value="0">0★ / 废片</option>
+        </select>
+        <select id="scSortSel" class="nat-sel" title="排序">
+          <option value="final">按综合分</option>
+          <option value="score">按技术分</option>
+          <option value="ai">按 AI 分</option>
+          <option value="name">按文件名</option>
+        </select>
+        <button id="scSelAll" class="ghost mini" title="选中本层当前显示的全部照片">全选</button>
+        <button id="scSelNone" class="ghost mini" title="取消全部勾选" disabled>清空</button>
+        <span class="sc-selinfo" id="scSelInfo"></span>
+        <button id="scBurstBtn" class="ghost mini" title="把连拍/重复的照片折叠成一组，只留封面">连拍分组</button>
+        <button id="scGroupBtn" class="ghost mini" title="照原版评分器的分组页：按 3/5/10 级把已评分的照片分成一组一组看，还能把低分组整体搬到别的文件夹">评分分组</button>
+        <button id="scCompareBtn" class="ghost mini" disabled title="勾选两张照片，并排对比技术分、AI 分和各评分点">对比选中</button>
+        <button id="scClearBtn" class="ghost mini" title="清除评分：勾了就只清勾选的那几张，没勾清整个文件夹（照片本身不动）">清除评分</button>
+        <button id="scRunBtn" class="primary mini" title="开始评分：勾了就只评勾选的那几张，没勾评整个文件夹">开始评分</button>
+      </div>
+
+      <!-- AI 行：照旧版评分器的排法，一行看全；不用进设置也知道现在用的是什么 -->
+      <div class="sc-airow">
+        <label class="check sc-aichk" title="勾上才会调用大模型做语义判别；不勾只跑本机技术评分（离线、不联网）">
+          <input id="scAiOn" type="checkbox"> AI 语义评分
+        </label>
+        <label class="chk-inline" title="照片里是什么类群，AI 就按那一类的鉴定要点评">
+          评分对象 <select id="scAiTaxon"></select>
+        </label>
+        <label class="check sc-quick-strict" id="scQuickStrictWrap" title="进阶：按当前评分对象的鉴定标准严格评审（逐项检查该类群的鉴定关键部位）。「通用(自动判断)」没有专属判据，勾了也不生效。">
+          <input id="scQuickStrict" type="checkbox"> <span id="scQuickStrictTxt">（进阶）专用检测</span>
+        </label>
+        <label class="chk-inline" title="云端＝阿里云百炼（要自己的 API Key）；本地＝llama.cpp 在本机跑">
+          引擎 <select id="scAiEngine">
+            <option value="cloud">云端百炼</option>
+            <option value="local">本地模型</option>
+          </select>
+        </label>
+        <select id="scAiModel" class="nat-sel sc-aimodel" title="用哪个模型判别"></select>
+        <button id="scQuickLlama" class="ghost mini" title="不用打开设置：一键启动/停止内置的 llama.cpp 本地服务">启动本地服务</button>
+        <span class="sc-aist" id="scAiStatus">未配置</span>
+        <span class="nat-gap"></span>
+        <button id="scCfgBtn" class="ghost mini" title="云端 API Key / 图片边长 / 每批张数等详细设置">AI 设置</button>
+        <button id="scLocalMgrBtn" class="ghost mini" title="打开本地模型的设置：选主模型和视觉投影、打开模型文件夹、启停服务">本地模型管理</button>
+        <span class="sc-aist sc-fml" title="综合分就是排序默认用的那个分数；只跑技术评分时显示的就是技术分">综合分 = 技术×0.55 + AI×0.45</span>
+      </div>
+
+      <!-- 动作行：评分页只管评分。跨页的「送去标注 / 传到相册」已在别的页面有，不再重复 -->
+      <div class="sc-actrow">
+        <span id="scSummary">还没评分</span>
+        <span class="sc-aist" id="scAiLeft"></span>
+        <span class="nat-gap"></span>
+        <span class="sc-aist" id="scSource" title="评分对象跟随左栏最上面的「本机端 / 相册端」切换">本机端</span>
+        <button id="scAiRunBtn" class="ghost mini" disabled title="对选中的照片调用 AI 判别">AI 判别选中</button>
+      </div>
+    </div>
+
+    <!-- 各页顶部的控制条停靠在这里：文件夹树在上、控制在下面，主区整块让给内容 -->
+    <div class="rail-dock" id="dockAnnotate" hidden>
+      <div class="toolbar">
+        <div class="crumbs"><button id="upBtn" class="ghost" title="上一级">↑</button><span id="curPath"></span><em id="dirStat"></em></div>
+        <div class="tools">
+          <div class="seg" id="filterSeg">
+            <button data-f="all" class="on">全部</button>
+            <button data-f="nolatin" title="只显示没有写拉丁学名的图（标签和文件名都没有学名），方便快速找到还没鉴定的">没有学名 <b id="nolatinCount" class="fc">0</b></button>
+            <button data-f="todo">未标注</button>
+            <button data-f="done">已标注</button>
+            <button data-f="cand">有候选</button>
+          </div>
+          <div class="tool-group">
+            <button id="selAll" class="ghost">全选未标注</button>
+            <button id="selNone" class="ghost">清空</button>
+            <button id="undoBtn" class="ghost" hidden title="撤销上一次本机写标签 / 重命名">撤销</button>
+          </div>
+          <details class="more-tools">
+            <summary class="ghost mini">更多</summary>
+            <div class="more-menu">
+              <button id="exportBtn" class="ghost" title="导出带拍摄时间和经纬度的标注明细、物种清单">导出清单</button>
+              <button id="dwcBtn" class="ghost" title="Darwin Core 标准格式：occurrence.txt + taxon.txt + meta.xml，打成 zip 可直接导进 GBIF 或交给合作单位">Darwin Core</button>
+              <button id="toScoreBtn" class="ghost" title="给当前这个文件夹的照片打技术分，按星级挑片，可再送去标注或传到自然在线">照片评分</button>
+              <button id="nameCheckBtn" class="ghost" title="只有中文名或只有学名的照片，用内置《中国生物物种名录》把另一侧补齐；确认后才写回">物种名核对</button>
+              <button id="pasteBtn" class="ghost" title="不用打开文件夹：Ctrl+V 粘贴一张图、或直接拖进来，立刻看多站识别结果">粘贴单图识别</button>
+              <button id="tagBatchBtn" class="ghost" hidden title="相册端批量鉴定：对勾选的照片统一赋一个名字，一次写回自然在线（只传鉴定结果，不传图片）">批量鉴定</button>
+            </div>
+          </details>
+          <button id="runBtn" class="primary" title="识别勾选的照片；在照片区按住鼠标拖出方框可批量框选">识别选中 <b id="selCount">0</b></button>
+        </div>
+      </div>
+    </div>
+    <div class="rail-dock" id="dockStats" hidden>
+      <div class="st-bar">
+        <button id="stBackBtn" class="ghost" title="回到文件夹列表，换一个文件夹统计" hidden>← 换个文件夹</button>
+        <span id="statsPath" class="muted" style="font-size:12px;word-break:break-all"></span>
+        <span class="st-busy" id="statsBusy" hidden><span class="spin"></span> 扫描中…</span>
+        <button id="reStatsBtn" class="ghost" title="按这个文件夹重新统计" hidden>↻ 重新统计</button>
+      </div>
+    </div>
+    <div class="rail-dock" id="dockArchive" hidden>
+      <div class="toolbar">
+        <div class="crumbs"><span id="archCurPath"></span><em id="archSelInfo"></em></div>
+        <div class="tools">
+          <label class="check" title="复制进目标文件夹，原图不动；取消勾选则是移动"><input id="archCopy" type="checkbox" checked> 复制</label>
+          <label class="check" title="勾选＝每个物种单独一个文件夹（界/门/纲/目/科/属/种）；不勾＝同属物种共用一个属文件夹，种名靠文件名区分"><input id="archBySpecies" type="checkbox"> 每个种一个文件夹</label>
+          <div class="destbox">
+            <input id="archDest" type="text" spellcheck="false" placeholder="目标文件夹（留空＝就地归档）">
+            <button id="archDestPick" class="ghost" title="选择一个用来接收照片的总文件夹">浏览…</button>
+            <button id="archDestClear" class="ghost" title="清空目标，改为在当前文件夹就地归档">×</button>
+          </div>
+          <button id="archRun" class="primary">开始归并</button>
+        </div>
+      </div>
+    </div>
+    <div class="rail-dock" id="dockNature" hidden>
+      <div class="nat-bar">
+        <span class="nat-dot" id="natDot"></span>
+        <span class="nat-who" id="natWho">正在检查登录状态…</span>
+        <div class="nat-login" id="natLoginBox" hidden title="这里登录的是你自己的自然在线账号，只用于相册和写回鉴定；识别用的是程序内置的账号，不用登录">
+          <input id="natUserInput" type="text" spellcheck="false" autocomplete="username" placeholder="自然在线账号（相册用）">
+          <input id="natPassInput" type="password" autocomplete="current-password" placeholder="密码">
+          <img id="natCapImg" class="nat-cap" alt="验证码" title="看不清？点一下换一张">
+          <input id="natCapInput" type="text" maxlength="6" spellcheck="false" placeholder="看图填写验证码">
+          <button id="natLoginBtn" class="primary mini">登录</button>
+        </div>
+        <button id="natLogoutBtn" class="ghost mini" hidden>退出登录</button>
+        <a class="nat-host" id="natHost" href="https://ecp.ibiodiversity.cn" target="_blank" rel="noopener noreferrer" title="单击在浏览器打开自然在线"></a>
+        <span class="nat-gap"></span>
+        <div class="nat-up-mode" title="上传到哪里：固定一个相册，或者按图片标签里的物种名各自建相册">
+          <span>上传到</span>
+          <select id="natUpMode">
+            <option value="album">选中的相册</option>
+            <option value="species">按物种名分相册</option>
+          </select>
+        </div>
+        <button id="natUpBtn" class="primary mini" disabled title="把「标注」页里勾选的图传上去">↑ 上传选中的 0 张</button>
+        <button id="natRefreshBtn" class="ghost mini" title="重新读一遍相册列表">↻ 刷新</button>
+      </div>
+    </div>
+    <div class="rail-dock" id="dockLibrary" hidden>
+      <div class="lib-bar">
+        <input id="libRoot" type="text" spellcheck="false" placeholder="要索引的根文件夹，例如 E:\照片\2026">
+        <button id="libUseCur" class="ghost mini" title="把当前左侧选中的文件夹填进来">用当前文件夹</button>
+        <button id="libScanBtn" class="primary mini" title="递归扫描这个文件夹及所有子文件夹，读标签、文件名、拍摄时间；只读，不改文件">建立 / 更新索引</button>
+        <button id="libCancelBtn" class="ghost mini" hidden>取消</button>
+      </div>
+    </div>
+
 
     <!-- 相册端：左栏换成自然在线的相册列表（本机端时整块藏起来） -->
     <div class="rail-head" id="railHeadAlbums" hidden><span>自然在线相册</span><b id="albumRailCount">0</b><button id="albumRailNewBtn" class="rail-refresh" type="button" title="新建相册">＋</button><button id="albumRailRefresh" class="rail-refresh" title="重新读一遍相册列表">↻</button></div>
@@ -83,36 +244,6 @@
 
   <main class="main">
     <div id="browseView" class="on">
-    <div class="toolbar">
-      <div class="crumbs"><button id="upBtn" class="ghost" title="上一级">↑</button><span id="curPath"></span><em id="dirStat"></em></div>
-      <div class="tools">
-        <div class="seg" id="filterSeg">
-          <button data-f="all" class="on">全部</button>
-          <button data-f="nolatin" title="只显示没有写拉丁学名的图（标签和文件名都没有学名），方便快速找到还没鉴定的">没有学名 <b id="nolatinCount" class="fc">0</b></button>
-          <button data-f="todo">未标注</button>
-          <button data-f="done">已标注</button>
-          <button data-f="cand">有候选</button>
-        </div>
-        <div class="tool-group">
-          <button id="selAll" class="ghost">全选未标注</button>
-          <button id="selNone" class="ghost">清空</button>
-          <button id="undoBtn" class="ghost" hidden title="撤销上一次本机写标签 / 重命名">撤销</button>
-        </div>
-        <details class="more-tools">
-          <summary class="ghost mini">更多</summary>
-          <div class="more-menu">
-            <button id="exportBtn" class="ghost" title="导出带拍摄时间和经纬度的标注明细、物种清单">导出清单</button>
-            <button id="dwcBtn" class="ghost" title="Darwin Core 标准格式：occurrence.txt + taxon.txt + meta.xml，打成 zip 可直接导进 GBIF 或交给合作单位">Darwin Core</button>
-            <button id="toScoreBtn" class="ghost" title="给当前这个文件夹的照片打技术分，按星级挑片，可再送去标注或传到自然在线">照片评分</button>
-            <button id="nameCheckBtn" class="ghost" title="只有中文名或只有学名的照片，用内置《中国生物物种名录》把另一侧补齐；确认后才写回">物种名核对</button>
-            <button id="pasteBtn" class="ghost" title="不用打开文件夹：Ctrl+V 粘贴一张图、或直接拖进来，立刻看多站识别结果">粘贴单图识别</button>
-            <button id="tagBatchBtn" class="ghost" hidden title="相册端批量鉴定：对勾选的照片统一赋一个名字，一次写回自然在线（只传鉴定结果，不传图片）">批量鉴定</button>
-          </div>
-        </details>
-        <button id="runBtn" class="primary" title="识别勾选的照片；在照片区按住鼠标拖出方框可批量框选">识别选中 <b id="selCount">0</b></button>
-      </div>
-    </div>
-
     <!-- 翻页条：图多的时候一页只渲染一部分，缩略图不用一次全铺出来 -->
     <div class="pager" id="pager" hidden>
       <button id="pgPrev" class="ghost mini" title="上一页（键盘 ←）">‹ 上一页</button>
@@ -136,12 +267,6 @@
     </div><!-- /browseView -->
 
     <div id="statsView">
-      <div class="st-bar">
-        <button id="stBackBtn" class="ghost" title="回到文件夹列表，换一个文件夹统计" hidden>← 换个文件夹</button>
-        <span id="statsPath" class="muted" style="font-size:12px;word-break:break-all"></span>
-        <span class="st-busy" id="statsBusy" hidden><span class="spin"></span> 扫描中…</span>
-        <button id="reStatsBtn" class="ghost" title="按这个文件夹重新统计" hidden>↻ 重新统计</button>
-      </div>
       <div class="st-land" id="stLand">
         <div class="st-land-head">
           选一个文件夹开始统计<span class="muted">　统计范围含它的所有子文件夹；只读，不改任何文件</span>
@@ -172,19 +297,6 @@
           <button id="taxoDlHide" class="ghost mini" title="这次先不管（重新进页面还会提醒）">×</button>
         </div>
       </div>
-      <div class="toolbar">
-        <div class="crumbs"><span id="archCurPath"></span><em id="archSelInfo"></em></div>
-        <div class="tools">
-          <label class="check" title="复制进目标文件夹，原图不动；取消勾选则是移动"><input id="archCopy" type="checkbox" checked> 复制</label>
-          <label class="check" title="勾选＝每个物种单独一个文件夹（界/门/纲/目/科/属/种）；不勾＝同属物种共用一个属文件夹，种名靠文件名区分"><input id="archBySpecies" type="checkbox"> 每个种一个文件夹</label>
-          <div class="destbox">
-            <input id="archDest" type="text" spellcheck="false" placeholder="目标文件夹（留空＝就地归档）">
-            <button id="archDestPick" class="ghost" title="选择一个用来接收照片的总文件夹">浏览…</button>
-            <button id="archDestClear" class="ghost" title="清空目标，改为在当前文件夹就地归档">×</button>
-          </div>
-          <button id="archRun" class="primary">开始归并</button>
-        </div>
-      </div>
       <div class="arch-scope">
         <div class="seg" id="archScope">
           <button data-m="own" title="只处理当前这一层，不往下走">只处理当前文件夹</button>
@@ -203,30 +315,6 @@
 
     <div id="natView">
       <!-- 登录条：没登录时出验证码；登录了只显示账号 -->
-      <div class="nat-bar">
-        <span class="nat-dot" id="natDot"></span>
-        <span class="nat-who" id="natWho">正在检查登录状态…</span>
-        <div class="nat-login" id="natLoginBox" hidden title="这里登录的是你自己的自然在线账号，只用于相册和写回鉴定；识别用的是程序内置的账号，不用登录">
-          <input id="natUserInput" type="text" spellcheck="false" autocomplete="username" placeholder="自然在线账号（相册用）">
-          <input id="natPassInput" type="password" autocomplete="current-password" placeholder="密码">
-          <img id="natCapImg" class="nat-cap" alt="验证码" title="看不清？点一下换一张">
-          <input id="natCapInput" type="text" maxlength="6" spellcheck="false" placeholder="看图填写验证码">
-          <button id="natLoginBtn" class="primary mini">登录</button>
-        </div>
-        <button id="natLogoutBtn" class="ghost mini" hidden>退出登录</button>
-        <a class="nat-host" id="natHost" href="https://ecp.ibiodiversity.cn" target="_blank" rel="noopener noreferrer" title="单击在浏览器打开自然在线"></a>
-        <span class="nat-gap"></span>
-        <div class="nat-up-mode" title="上传到哪里：固定一个相册，或者按图片标签里的物种名各自建相册">
-          <span>上传到</span>
-          <select id="natUpMode">
-            <option value="album">选中的相册</option>
-            <option value="species">按物种名分相册</option>
-          </select>
-        </div>
-        <button id="natUpBtn" class="primary mini" disabled title="把「标注」页里勾选的图传上去">↑ 上传选中的 0 张</button>
-        <button id="natRefreshBtn" class="ghost mini" title="重新读一遍相册列表">↻ 刷新</button>
-      </div>
-
       <!-- 上传进度（平时收起） -->
       <div class="nat-progress" id="natProgress" hidden>
         <div class="bar"><div class="fill" id="natBar"></div></div>
@@ -305,66 +393,6 @@
 
     <!-- 「照片评分」：算法整体内置，页面不是外挂 iframe -->
     <div id="scoreView">
-      <div class="sc-bar">
-        <span class="sc-dir" id="scDir" title="评分对象就是左边选中的文件夹">当前文件夹：—</span>
-        <span class="nat-gap"></span>
-        <select id="scStarSel" class="nat-sel" title="按星级筛选">
-          <option value="">全部星级</option>
-          <option value="3">★★★ 优选</option>
-          <option value="2">★★ 良好</option>
-          <option value="1">★ 可留</option>
-          <option value="0">0★ / 废片</option>
-        </select>
-        <select id="scSortSel" class="nat-sel" title="排序">
-          <option value="final">按综合分</option>
-          <option value="score">按技术分</option>
-          <option value="ai">按 AI 分</option>
-          <option value="name">按文件名</option>
-        </select>
-        <button id="scSelAll" class="ghost mini" title="选中本层当前显示的全部照片">全选</button>
-        <button id="scSelNone" class="ghost mini" title="取消全部勾选" disabled>清空</button>
-        <span class="sc-selinfo" id="scSelInfo"></span>
-        <button id="scBurstBtn" class="ghost mini" title="把连拍/重复的照片折叠成一组，只留封面">连拍分组</button>
-        <button id="scGroupBtn" class="ghost mini" title="照原版评分器的分组页：按 3/5/10 级把已评分的照片分成一组一组看，还能把低分组整体搬到别的文件夹">评分分组</button>
-        <button id="scCompareBtn" class="ghost mini" disabled title="勾选两张照片，并排对比技术分、AI 分和各评分点">对比选中</button>
-        <button id="scClearBtn" class="ghost mini" title="清除评分：勾了就只清勾选的那几张，没勾清整个文件夹（照片本身不动）">清除评分</button>
-        <button id="scRunBtn" class="primary mini" title="开始评分：勾了就只评勾选的那几张，没勾评整个文件夹">开始评分</button>
-      </div>
-
-      <!-- AI 行：照旧版评分器的排法，一行看全；不用进设置也知道现在用的是什么 -->
-      <div class="sc-airow">
-        <label class="check sc-aichk" title="勾上才会调用大模型做语义判别；不勾只跑本机技术评分（离线、不联网）">
-          <input id="scAiOn" type="checkbox"> AI 语义评分
-        </label>
-        <label class="chk-inline" title="照片里是什么类群，AI 就按那一类的鉴定要点评">
-          评分对象 <select id="scAiTaxon"></select>
-        </label>
-        <label class="check sc-quick-strict" id="scQuickStrictWrap" title="进阶：按当前评分对象的鉴定标准严格评审（逐项检查该类群的鉴定关键部位）。「通用(自动判断)」没有专属判据，勾了也不生效。">
-          <input id="scQuickStrict" type="checkbox"> <span id="scQuickStrictTxt">（进阶）专用检测</span>
-        </label>
-        <label class="chk-inline" title="云端＝阿里云百炼（要自己的 API Key）；本地＝llama.cpp 在本机跑">
-          引擎 <select id="scAiEngine">
-            <option value="cloud">云端百炼</option>
-            <option value="local">本地模型</option>
-          </select>
-        </label>
-        <select id="scAiModel" class="nat-sel sc-aimodel" title="用哪个模型判别"></select>
-        <button id="scQuickLlama" class="ghost mini" title="不用打开设置：一键启动/停止内置的 llama.cpp 本地服务">启动本地服务</button>
-        <span class="sc-aist" id="scAiStatus">未配置</span>
-        <span class="nat-gap"></span>
-        <button id="scCfgBtn" class="ghost mini" title="云端 API Key / 图片边长 / 每批张数等详细设置">AI 设置</button>
-        <button id="scLocalMgrBtn" class="ghost mini" title="打开本地模型的设置：选主模型和视觉投影、打开模型文件夹、启停服务">本地模型管理</button>
-        <span class="sc-aist sc-fml" title="综合分就是排序默认用的那个分数；只跑技术评分时显示的就是技术分">综合分 = 技术×0.55 + AI×0.45</span>
-      </div>
-
-      <!-- 动作行：评分页只管评分。跨页的「送去标注 / 传到相册」已在别的页面有，不再重复 -->
-      <div class="sc-actrow">
-        <span id="scSummary">还没评分</span>
-        <span class="sc-aist" id="scAiLeft"></span>
-        <span class="nat-gap"></span>
-        <span class="sc-aist" id="scSource" title="评分对象跟随左栏最上面的「本机端 / 相册端」切换">本机端</span>
-        <button id="scAiRunBtn" class="ghost mini" disabled title="对选中的照片调用 AI 判别">AI 判别选中</button>
-      </div>
 
       <div class="sc-dirs" id="scDirs" hidden></div>
 
@@ -548,12 +576,6 @@
 
     <div id="libraryView">
       <div class="lib-head">
-        <div class="lib-bar">
-          <input id="libRoot" type="text" spellcheck="false" placeholder="要索引的根文件夹，例如 E:\照片\2026">
-          <button id="libUseCur" class="ghost mini" title="把当前左侧选中的文件夹填进来">用当前文件夹</button>
-          <button id="libScanBtn" class="primary mini" title="递归扫描这个文件夹及所有子文件夹，读标签、文件名、拍摄时间；只读，不改文件">建立 / 更新索引</button>
-          <button id="libCancelBtn" class="ghost mini" hidden>取消</button>
-        </div>
         <div class="lib-progress" id="libProgress" hidden>
           <div class="bar"><div class="fill" id="libBar"></div></div>
           <span id="libPText"></span>

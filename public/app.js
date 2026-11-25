@@ -253,6 +253,15 @@ function bindTheme() {
 }
 
 const RAIL_KEY = 'tagden-rail-collapsed';
+const SCORE_RAIL_FOLD_KEY = 'tagden-score-rail-folded';
+// 左栏底部停靠槽：每个页面把自己的控制条放进来（树在上、控制在下）
+const RAIL_DOCKS = {
+  annotate: 'dockAnnotate',
+  stats: 'dockStats',
+  archive: 'dockArchive',
+  nature: 'dockNature',
+  library: 'dockLibrary',
+};
 function setRailCollapsed(on) {
   const lay = document.querySelector('.layout');
   if (lay) lay.classList.toggle('rail-collapsed', Boolean(on));
@@ -265,6 +274,23 @@ function bindRailCollapse() {
   setRailCollapsed(saved && !drawerNarrow());
   if ($('railFold')) $('railFold').onclick = () => setRailCollapsed(true);
   if ($('railExpand')) $('railExpand').onclick = () => setRailCollapsed(false);
+  // 左栏里的评分面板：收起后只留「当前文件夹 + 开始评分」，高度还给文件树
+  if ($('railScore') && $('railScoreFold')) {
+    const btn = $('railScoreFold');
+    let folded = false;
+    try { folded = localStorage.getItem(SCORE_RAIL_FOLD_KEY) === '1'; } catch {}
+    const paintFold = () => {
+      $('railScore').classList.toggle('folded', folded);
+      btn.textContent = folded ? '展开 ▸' : '收起 ◂';
+      btn.title = folded ? '展开评分设置（筛选、AI、分组等）' : '收起评分设置，把高度让给下面的文件夹树';
+    };
+    paintFold();
+    btn.onclick = () => {
+      folded = !folded;
+      paintFold();
+      try { localStorage.setItem(SCORE_RAIL_FOLD_KEY, folded ? '1' : '0'); } catch {}
+    };
+  }
   window.addEventListener('resize', () => { if (drawerNarrow()) setRailCollapsed(false); });
 }
 
@@ -351,6 +377,10 @@ async function boot() {
   bindArchiveTab();
   bindTree();
   bindTabs();
+  // 首屏就是标注页：停靠槽要跟着初始化，否则第一次进来左栏底部是空的
+  syncRailDocks(S.tab || 'annotate');
+  // 首屏就是标注页：停靠槽要跟着初始化，否则第一次进来左栏底部是空的
+  syncRailDocks(S.tab || 'annotate');
   bindNature();
   bindScore();
   bindLibrary();
@@ -5556,6 +5586,15 @@ function bindLibrary() {
   if ($('libSim')) $('libSim').onclick = libResultClick;
 }
 
+/** 左栏底部只露当前页那一块：评分面板或该页的控制条 */
+function syncRailDocks(name) {
+  if ($('railScore')) $('railScore').hidden = name !== 'score';
+  for (const [tab, id] of Object.entries(RAIL_DOCKS)) {
+    const el = $(id);
+    if (el) el.hidden = tab !== name;
+  }
+}
+
 function showTab(name) {
   S.tab = name;
   closeDrawers();
@@ -5574,6 +5613,7 @@ function showTab(name) {
   // 统计、归档、自然在线、照片评分都是「整块占用」的视图，右边那块标注面板收起来
   lay.classList.toggle('stats-mode', name === 'stats' || name === 'archive' || name === 'nature' || name === 'score' || name === 'library');
   for (const [k, el] of Object.entries(views)) if (el) el.classList.toggle('on', k === name);
+  syncRailDocks(name);
   [...$('tabs').children].forEach((b) => b.classList.toggle('on', b.dataset.tab === name));
   if (name === 'stats') statsOpen();
   if (name === 'archive') runArchiveTab();
@@ -9675,13 +9715,16 @@ function scRender() {
     }
   }
   const scored = Object.keys(SCR.scores).length;
-  $('scSummary').textContent = SCR.mode === 'album'
+  const summaryText = SCR.mode === 'album'
     ? (scored
       ? `已评 ${scored} 张 · 相册照片按技术分排序（原图取回本机算，不参与本机批内星级）`
-      : '还没评分 · 点右上角「开始评分」，相册原图取回本机算，不上传任何照片')
+      : '还没评分 · 点上面的「开始评分」，相册原图取回本机算，不上传任何照片')
     : scored
       ? `已评 ${scored} 张 · ★★★ ${SCR.counts[3]} / ★★ ${SCR.counts[2]} / ★ ${SCR.counts[1]} / 0★ ${SCR.counts[0]}${SCR.invalid ? ` · 废片 ${SCR.invalid}` : ''}${SCR.groupMode ? ' · 连拍已折叠' : ''}`
-      : '还没评分 · 点右上角「开始评分」，本机算法离线运行，不上传任何照片';
+      : '还没评分 · 点上面的「开始评分」，本机算法离线运行，不上传任何照片';
+  // 左栏窄，摘要一行就够；完整文字挂到 title 上，鼠标停一下能看全
+  $('scSummary').textContent = summaryText;
+  $('scSummary').title = summaryText;
   // 筛选/排序会改变「本层可见张数」，全选按钮的可用状态要跟着走
   scSyncSel();
 }
