@@ -2359,7 +2359,10 @@ html[data-theme="dark"] {
   flex: 0 0 auto;
   min-height: 0;
   max-height: none;
+  /* 只许纵向滚。overflow-y:auto 会把 overflow-x 也算成 auto，
+     左栏里任何一处宽出 1px 都会在底部多出一条横向滚动条。 */
   overflow-y: auto;
+  overflow-x: hidden;
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -2370,16 +2373,16 @@ html[data-theme="dark"] {
 .rail-dock[hidden] { display: none !important; }
 .rail-dock [hidden] { display: none !important; }
 .rail-dock > * { min-width: 0; }
-/* 标注 / 归档共用的 .toolbar */
+/* 标注 / 归档共用的 .toolbar
+   用 block 流而不是纵向 flex：flex 子项在窄栏里会被自己的最小内容宽度顶开
+   （实测工具栏 327px vs 可用 268px），右侧直接被裁掉一截按钮。 */
 .rail-dock .toolbar {
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 6px;
+  display: block;
   padding: 0;
   border: 0;
   background: none;
 }
+.rail-dock .toolbar > * + * { margin-top: 6px; }
 .rail-dock .crumbs { flex: 1 1 auto; gap: 5px; }
 /* 窄栏里路径只占一行：折成两行会把下面一排按钮顶出可视区 */
 .rail-dock .crumbs span,
@@ -2393,15 +2396,16 @@ html[data-theme="dark"] {
 /* 相册端标注控件里的「相册端 · 还没选相册 / 0 张」和左栏列表标题重复，收掉这一行，
    控件才放得下（少了这行会矮 20px，底部「识别选中」被裁） */
 body.src-album #dockAnnotate .crumbs { display: none; }
-/* 相册端的「全选本页 / 清空 / 撤销」原来挤在一个 86px 的格子里折成两行，
-   整行拉平后省 26px，正好放下下面的「更多」和「识别选中」 */
-body.src-album #dockAnnotate .tool-group {
+/* 「全选本页 / 清空 / 撤销」整行铺开：挤在 86px 的格子里会竖着摞成两行 */
+.rail-dock .tool-group {
   grid-column: 1 / -1;
   display: flex;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   gap: 5px;
+  padding-left: 0;
+  border-left: 0;
 }
-body.src-album #dockAnnotate .tool-group > * { flex: 1 1 0; min-width: 0; }
+.rail-dock .tool-group > * { flex: 1 1 0; min-width: 0; }
 .rail-dock .tools {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(84px, 1fr));
@@ -2411,8 +2415,29 @@ body.src-album #dockAnnotate .tool-group > * { flex: 1 1 0; min-width: 0; }
 .rail-dock .tools > * { min-width: 0; flex: 0 1 auto; }
 .rail-dock .tools > .seg,
 .rail-dock .tools > .destbox { grid-column: 1 / -1; }
+/* 其他页的 seg 保持原来的折行即可 */
 .rail-dock .seg { flex-wrap: wrap; }
-.rail-dock .seg button { font-size: 11px; padding: 3px 5px; flex: 1 1 auto; }
+/* 标注页的筛选条：窄栏里一长条放不下（实测需要 327px），改成两列小格自动折行，
+   五个选项都能看全，不再靠 overflow 裁掉「有候选」 */
+#filterSeg {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  border: 0;
+  border-radius: 0;
+  overflow: visible;
+}
+#filterSeg button {
+  min-width: 0;
+  font-size: 11px;
+  padding: 4px 5px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#filterSeg button + button { border-left: 1px solid var(--line); }
 .rail-dock .destbox { display: flex; gap: 4px; width: auto; }
 .rail-dock .destbox input { flex: 1 1 auto; min-width: 0; width: auto; font-size: 11px; padding: 4px 6px; }
 .rail-dock .ghost,
@@ -2425,23 +2450,12 @@ body.src-album #dockAnnotate .tool-group > * { flex: 1 1 0; min-width: 0; }
   overflow: hidden;
   text-overflow: ellipsis;
 }
-/* 「更多」在主区是个浮层，在窄栏里会被 overflow 裁掉一半 → 改成原地展开 */
-.rail-dock .more-tools { grid-column: 1 / -1; display: block; }
-.rail-dock .more-tools > summary { justify-content: center; }
-.rail-dock .more-menu {
-  position: static;
-  width: auto;
-  margin-top: 5px;
-  padding: 4px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  box-shadow: none;
-  background: var(--bg);
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
+/* 「更多」原地展开会给控件区加一百多像素，左栏放不下时最后一项会被裁掉：
+   只在展开期间让控件区收缩并自己滚（平时仍是 flex:0 0 auto，绝不压缩按钮）。 */
+.rail-dock:has(.more-tools[open]) {
+  flex: 0 1 auto;
+  overflow-y: auto;
 }
-.rail-dock .more-menu button { width: 100%; text-align: left; }
 
 /* 「更多」在主区是个浮层，在窄栏里会被 overflow 裁掉一半 → 改成原地展开 */
 .rail-dock .more-tools { grid-column: 1 / -1; display: block; }
@@ -2461,6 +2475,23 @@ body.src-album #dockAnnotate .tool-group > * { flex: 1 1 0; min-width: 0; }
 }
 .rail-dock .more-menu button { width: 100%; text-align: left; }
 
+/* 「更多」在主区是个浮层，在窄栏里会被 overflow 裁掉一半 → 改成原地展开 */
+.rail-dock .more-tools { grid-column: 1 / -1; display: block; }
+.rail-dock .more-tools > summary { justify-content: center; }
+.rail-dock .more-menu {
+  position: static;
+  width: auto;
+  margin-top: 5px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: none;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.rail-dock .more-menu button { width: 100%; text-align: left; }
 /* 统计页：路径 + 重新统计 */
 .rail-dock .st-bar {
   flex-wrap: wrap;
