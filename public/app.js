@@ -6712,6 +6712,7 @@ function applyNatRailSide(side) {
   const seg = $('srcSeg');
   if (seg) [...seg.querySelectorAll('button[data-src]')].forEach((b) => b.classList.toggle('on', b.dataset.src === side));
   if ($('railHeadFiles')) $('railHeadFiles').hidden = album;
+  if ($('albumZone')) $('albumZone').hidden = !album;
   if ($('railHeadAlbums')) $('railHeadAlbums').hidden = !album;
   if ($('albumRail')) $('albumRail').hidden = !album;
   const pathbox = $('pathInput') && $('pathInput').closest('.pathbox');
@@ -7083,6 +7084,7 @@ async function setSource(mode, opts = {}) {
   $('panelEmpty').hidden = false;
   $('panelBody').hidden = true;
   $('railHeadFiles').hidden = alb;
+  if ($('albumZone')) $('albumZone').hidden = !alb;
   $('railHeadAlbums').hidden = !alb;
   $('albumRail').hidden = !alb;
   const pathbox = $('pathInput') && $('pathInput').closest('.pathbox');

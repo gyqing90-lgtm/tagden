@@ -74,8 +74,10 @@
 
     <!-- 相册端：和文件夹树占同一个位置（列表在上、控件在下），本机端整块藏起来。
          必须放在各页停靠槽之前，否则相册列表会掉到控件下面。 -->
-    <div class="rail-head" id="railHeadAlbums" hidden><span>自然在线相册</span><b id="albumRailCount">0</b><button id="albumRailNewBtn" class="rail-refresh" type="button" title="新建相册">＋</button><button id="albumRailRefresh" class="rail-refresh" title="重新读一遍相册列表">↻</button></div>
-    <div id="albumRail" class="album-rail" hidden></div>
+    <div class="album-zone" id="albumZone" hidden>
+      <div class="rail-head" id="railHeadAlbums" hidden><span>自然在线相册</span><b id="albumRailCount">0</b><button id="albumRailNewBtn" class="rail-refresh" type="button" title="新建相册">＋</button><button id="albumRailRefresh" class="rail-refresh" title="重新读一遍相册列表">↻</button></div>
+      <div id="albumRail" class="album-rail" hidden></div>
+    </div>
 
     <!-- 评分页的 AI 行和摘要行停在左栏底部；筛选/按钮那一行留在主区顶部 -->
     <div class="rail-dock rail-score" id="dockScore" hidden>
