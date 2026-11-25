@@ -100,10 +100,11 @@ button { cursor: pointer; }
 
 /* ---------- 三栏 ---------- */
 .layout {
+  --tabsw: 60px; /* 左侧竖排页面栏的宽度；窄屏时置 0 并让 tabs 改回横排 */
   display: grid;
   /* 左边要让树能展开好几层，288 是缩进和长名字之间的平衡点（可拖拽，宽度存在 --rail-w）
      中间那 8px 是拖拽条，它自己画分隔线 */
-  grid-template-columns: var(--rail-w, 288px) 8px minmax(0, 1fr) 356px;
+  grid-template-columns: var(--tabsw) var(--rail-w, 288px) 8px minmax(0, 1fr) 356px;
   gap: 0;
   flex: 1 1 auto;
   min-height: 0;
@@ -1253,34 +1254,102 @@ html[data-theme="dark"] .taxo-dl-act .primary.mini { color: #1b1207; }
 .sheet.dirs .arch-list { max-height: 40vh; }
 .sheet.dirs .arch-list label { padding: 5px 2px; }
 
-/* ---------- 顶部标签页：标注 / 统计分析 ---------- */
+/* ---------- 左侧页面栏：标注 / 统计分析 / 归档 / 自然在线 / 评分 / 图库 ----------
+ * 竖排图标，只有鼠标移上去（或键盘聚焦）才出名字和一句说明。
+ * 宽度走 --tabsw（定义在 .layout 上），窄屏时置 0 并在下方 media 里改回横排。
+ */
 .tabs {
   display: flex;
+  flex-direction: column;
   align-items: center;
   gap: 2px;
-  padding: 0 16px;
+  padding: 10px 0;
   background: var(--card);
-  border-bottom: 1px solid var(--line);
+  border-right: 1px solid var(--line);
   flex: 0 0 auto;
+  min-width: 0;
+  z-index: 8;
 }
 .tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 42px;
+  padding: 0;
   border: 0;
+  border-radius: 10px;
   background: none;
   color: var(--ink-2);
-  font-size: 13px;
-  padding: 11px 14px;
   cursor: pointer;
-  position: relative;
+  transition: background .15s, color .15s;
 }
-.tab:hover { color: var(--green); }
-.tab.on { color: var(--green-d); font-weight: 700; }
+.tab:hover { color: var(--green-d); background: var(--green-l); }
+.tab:focus-visible { outline: 2px solid var(--green); outline-offset: 1px; }
+.tab.on { color: var(--green-d); background: var(--green-l); }
 .tab.on::after {
   content: '';
   position: absolute;
-  left: 10px; right: 10px; bottom: -1px;
-  height: 2px;
+  left: -1px; top: 50%;
+  transform: translateY(-50%);
+  width: 3px; height: 20px;
   background: var(--green);
-  border-radius: 2px;
+  border-radius: 0 3px 3px 0;
+}
+/* 名字与说明：默认隐藏，hover / 聚焦才浮出到右侧 */
+.tab-name {
+  position: absolute;
+  left: calc(100% + 10px);
+  top: 50%;
+  transform: translateY(-50%) translateX(-4px);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 7px 11px;
+  /* 宽度跟着内容走（名字一行放得下），说明那行按 250px 折行；
+     少了 width: max-content 会被 flex 压成几十像素，说明文字就一列一个字地竖排了 */
+  width: max-content;
+  max-width: 250px;
+  white-space: normal;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, .13);
+  color: var(--ink);
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.35;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity .14s, transform .14s, visibility .14s;
+  z-index: 60;
+}
+.tab-name em {
+  display: block;
+  white-space: normal;
+  color: var(--ink-3);
+  font-style: normal;
+  font-size: 11.5px;
+  font-weight: 400;
+  line-height: 1.45;
+}
+.tab-name::before {
+  content: '';
+  position: absolute;
+  left: -5px; top: 50%;
+  width: 8px; height: 8px;
+  transform: translateY(-50%) rotate(45deg);
+  background: var(--card);
+  border-left: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+.tab:hover .tab-name,
+.tab:focus-visible .tab-name {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(-50%) translateX(0);
 }
 
 /* 浏览 / 统计 两个视图切换：默认都收起，靠 .on 显身手 */
@@ -1294,7 +1363,7 @@ html[data-theme="dark"] .taxo-dl-act .primary.mini { color: #1b1207; }
 #browseView .grid { flex: 1 1 auto; }
 
 /* 统计模式：隐藏右侧标注面板，主区占满 */
-.layout.stats-mode { grid-template-columns: var(--rail-w, 288px) 8px minmax(0, 1fr); }
+.layout.stats-mode { grid-template-columns: var(--tabsw) var(--rail-w, 288px) 8px minmax(0, 1fr); }
 .layout.stats-mode .panel { display: none; }
 
 /* ---------- 可拖拽的分隔条（文件夹栏、相册栏） ---------- */
@@ -3340,37 +3409,9 @@ html, body {
   margin-left: auto;
 }
 
-.tabs {
-  padding: 8px 20px 0;
-  gap: 4px;
-  background: rgba(244, 241, 232, .92);
-  border-bottom: 1px solid var(--line);
-  flex-wrap: wrap;
-}
-.tab {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 12px 9px;
-  border: 1px solid transparent;
-  border-bottom: 0;
-  border-radius: 9px 9px 0 0;
-  color: var(--ink-2);
-  font-size: 12.5px;
-  line-height: 1.4;
-  transition: background .15s, color .15s, border-color .15s;
-}
-.tab:hover { color: var(--green-d); background: rgba(255, 253, 248, .6); }
-.tab.on {
-  background: var(--card);
-  border-color: var(--line);
-  color: var(--green-d);
-  font-weight: 600;
-  box-shadow: 0 -1px 0 rgba(255, 255, 255, .7);
-}
-.tab.on::after { display: none; }
+/* 图标：竖排栏里比原来的横排略大一点，纯线条风格，颜色跟 currentColor 走 */
 .tab-ico {
-  width: 15px; height: 15px;
+  width: 18px; height: 18px;
   fill: none;
   stroke: currentColor;
   stroke-width: 1.8;
@@ -3818,7 +3859,51 @@ html[data-theme="dark"] .zoom-mask { background: rgba(0,0,0,.94); }
   .layout,
   .layout.stats-mode {
     grid-template-columns: minmax(0, 1fr) !important;
+    /* 第一行放页面栏，第二行给内容区，否则两行都按内容高度、页面会塌成一条 */
+    grid-template-rows: auto minmax(0, 1fr);
+    --tabsw: 0px;
   }
+  /* 窄屏（手机 / 竖屏平板）左侧竖栏放不下：退回顶部横排，图标旁边直接显示文字，
+     不用 hover 提示 —— 触屏没有 hover，点了才知道是什么就没法用 */
+  .tabs {
+    flex-direction: row;
+    justify-content: flex-start;
+    gap: 4px;
+    padding: 6px 10px;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+  }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tab {
+    width: auto;
+    height: 34px;
+    gap: 6px;
+    padding: 0 10px;
+    border-radius: 9px;
+  }
+  .tab.on::after { display: none; }
+  .tab-name {
+    position: static;
+    display: inline;
+    transform: none;
+    opacity: 1;
+    visibility: visible;
+    padding: 0;
+    max-width: none;
+    border: 0;
+    border-radius: 0;
+    background: none;
+    box-shadow: none;
+    color: inherit;
+    font-size: 12.5px;
+    font-weight: inherit;
+    white-space: nowrap;
+  }
+  .tab-name em { display: none; }
+  .tab-name::before { display: none; }
   .gutter { display: none; }
   .drawer-btn { display: inline-flex; }
   #railToggle { display: inline-flex; }
@@ -3917,7 +4002,7 @@ html[data-theme="dark"] .toast { background: #26352c; color: #f2f7f3; }
 .rail-fold {
   position: absolute;
   top: 50%;
-  left: calc(var(--rail-w, 288px) + 4px);
+  left: calc(var(--tabsw) + var(--rail-w, 288px) + 4px);
   transform: translate(-50%, -50%);
   z-index: 7;
   width: 18px;
@@ -3939,7 +4024,7 @@ html[data-theme="dark"] .toast { background: #26352c; color: #f2f7f3; }
 .rail-expand {
   display: none;
   position: fixed;
-  left: 0;
+  left: var(--tabsw, 60px);
   top: 50%;
   transform: translateY(-50%);
   z-index: 45;
@@ -3960,9 +4045,9 @@ html[data-theme="dark"] .toast { background: #26352c; color: #f2f7f3; }
    这里的轨道数必须和 .layout 默认那 4 列一一对应（rail | gutter | main | panel）：
    之前只写了 3 列，第 4 个子元素（右栏 panel）被挤到第 3 列 = main 的 1fr 上，
    main 落到第 2 列（0 宽）→ 一收左栏整页就只剩空白。 */
-.layout.rail-collapsed { grid-template-columns: 0 0 minmax(0, 1fr) 356px !important; }
+.layout.rail-collapsed { grid-template-columns: var(--tabsw) 0 0 minmax(0, 1fr) 356px !important; }
 /* 统计页没有右栏（.panel 被 display:none），轨道要少一条，否则右边空出 356px */
-.layout.stats-mode.rail-collapsed { grid-template-columns: 0 0 minmax(0, 1fr) !important; }
+.layout.stats-mode.rail-collapsed { grid-template-columns: var(--tabsw) 0 0 minmax(0, 1fr) !important; }
 /* 轨道 0 宽但元素仍在流里：rail 必须裁掉溢出，否则会盖到照片区上 */
 .layout.rail-collapsed .rail {
   min-width: 0;
