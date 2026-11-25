@@ -253,10 +253,11 @@ function bindTheme() {
 }
 
 const RAIL_KEY = 'tagden-rail-collapsed';
-const SCORE_RAIL_FOLD_KEY = 'tagden-score-rail-folded';
 // 左栏底部停靠槽：每个页面把自己的控制条放进来（树在上、控制在下）
 const RAIL_DOCKS = {
   annotate: 'dockAnnotate',
+  // 评分页只把 AI 行和摘要行停在这儿；筛选/按钮那一行在主区顶部
+  score: 'dockScore',
   stats: 'dockStats',
   archive: 'dockArchive',
   nature: 'dockNature',
@@ -274,23 +275,6 @@ function bindRailCollapse() {
   setRailCollapsed(saved && !drawerNarrow());
   if ($('railFold')) $('railFold').onclick = () => setRailCollapsed(true);
   if ($('railExpand')) $('railExpand').onclick = () => setRailCollapsed(false);
-  // 左栏里的评分面板：收起后只留「当前文件夹 + 开始评分」，高度还给文件树
-  if ($('railScore') && $('railScoreFold')) {
-    const btn = $('railScoreFold');
-    let folded = false;
-    try { folded = localStorage.getItem(SCORE_RAIL_FOLD_KEY) === '1'; } catch {}
-    const paintFold = () => {
-      $('railScore').classList.toggle('folded', folded);
-      btn.textContent = folded ? '展开 ▸' : '收起 ◂';
-      btn.title = folded ? '展开评分设置（筛选、AI、分组等）' : '收起评分设置，把高度让给下面的文件夹树';
-    };
-    paintFold();
-    btn.onclick = () => {
-      folded = !folded;
-      paintFold();
-      try { localStorage.setItem(SCORE_RAIL_FOLD_KEY, folded ? '1' : '0'); } catch {}
-    };
-  }
   window.addEventListener('resize', () => { if (drawerNarrow()) setRailCollapsed(false); });
 }
 
@@ -5586,9 +5570,8 @@ function bindLibrary() {
   if ($('libSim')) $('libSim').onclick = libResultClick;
 }
 
-/** 左栏底部只露当前页那一块：评分面板或该页的控制条 */
+/** 左栏底部只露当前页那一块：树在上，控制在下 */
 function syncRailDocks(name) {
-  if ($('railScore')) $('railScore').hidden = name !== 'score';
   for (const [tab, id] of Object.entries(RAIL_DOCKS)) {
     const el = $(id);
     if (el) el.hidden = tab !== name;

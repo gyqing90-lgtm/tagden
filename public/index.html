@@ -72,72 +72,40 @@
     <div id="places" class="places"></div>
     <div id="tree" class="tree"></div>
 
-    <!-- 评分控件：从主区搬进左栏，摆在文件夹树下面 -->
-    <div id="railScore" class="rail-score" hidden>
-      <div class="rail-score-head">
-        <span>评分设置</span>
-        <button id="railScoreFold" type="button" title="收起评分设置，把高度让给上面的文件夹树">收起 ◂</button>
-      </div>
-      <div class="sc-bar">
-        <span class="sc-dir" id="scDir" title="评分对象就是左边选中的文件夹">当前文件夹：—</span>
-        <span class="nat-gap"></span>
-        <select id="scStarSel" class="nat-sel" title="按星级筛选">
-          <option value="">全部星级</option>
-          <option value="3">★★★ 优选</option>
-          <option value="2">★★ 良好</option>
-          <option value="1">★ 可留</option>
-          <option value="0">0★ / 废片</option>
-        </select>
-        <select id="scSortSel" class="nat-sel" title="排序">
-          <option value="final">按综合分</option>
-          <option value="score">按技术分</option>
-          <option value="ai">按 AI 分</option>
-          <option value="name">按文件名</option>
-        </select>
-        <button id="scSelAll" class="ghost mini" title="选中本层当前显示的全部照片">全选</button>
-        <button id="scSelNone" class="ghost mini" title="取消全部勾选" disabled>清空</button>
-        <span class="sc-selinfo" id="scSelInfo"></span>
-        <button id="scBurstBtn" class="ghost mini" title="把连拍/重复的照片折叠成一组，只留封面">连拍分组</button>
-        <button id="scGroupBtn" class="ghost mini" title="照原版评分器的分组页：按 3/5/10 级把已评分的照片分成一组一组看，还能把低分组整体搬到别的文件夹">评分分组</button>
-        <button id="scCompareBtn" class="ghost mini" disabled title="勾选两张照片，并排对比技术分、AI 分和各评分点">对比选中</button>
-        <button id="scClearBtn" class="ghost mini" title="清除评分：勾了就只清勾选的那几张，没勾清整个文件夹（照片本身不动）">清除评分</button>
-        <button id="scRunBtn" class="primary mini" title="开始评分：勾了就只评勾选的那几张，没勾评整个文件夹">开始评分</button>
-      </div>
-
-      <!-- AI 行：照旧版评分器的排法，一行看全；不用进设置也知道现在用的是什么 -->
+    <!-- 评分页的 AI 行和摘要行停在左栏底部；筛选/按钮那一行留在主区顶部 -->
+    <div class="rail-dock rail-score" id="dockScore" hidden>
       <div class="sc-airow">
-        <label class="check sc-aichk" title="勾上才会调用大模型做语义判别；不勾只跑本机技术评分（离线、不联网）">
-          <input id="scAiOn" type="checkbox"> AI 语义评分
-        </label>
-        <label class="chk-inline" title="照片里是什么类群，AI 就按那一类的鉴定要点评">
-          评分对象 <select id="scAiTaxon"></select>
-        </label>
-        <label class="check sc-quick-strict" id="scQuickStrictWrap" title="进阶：按当前评分对象的鉴定标准严格评审（逐项检查该类群的鉴定关键部位）。「通用(自动判断)」没有专属判据，勾了也不生效。">
-          <input id="scQuickStrict" type="checkbox"> <span id="scQuickStrictTxt">（进阶）专用检测</span>
-        </label>
-        <label class="chk-inline" title="云端＝阿里云百炼（要自己的 API Key）；本地＝llama.cpp 在本机跑">
-          引擎 <select id="scAiEngine">
-            <option value="cloud">云端百炼</option>
-            <option value="local">本地模型</option>
-          </select>
-        </label>
-        <select id="scAiModel" class="nat-sel sc-aimodel" title="用哪个模型判别"></select>
-        <button id="scQuickLlama" class="ghost mini" title="不用打开设置：一键启动/停止内置的 llama.cpp 本地服务">启动本地服务</button>
-        <span class="sc-aist" id="scAiStatus">未配置</span>
-        <span class="nat-gap"></span>
-        <button id="scCfgBtn" class="ghost mini" title="云端 API Key / 图片边长 / 每批张数等详细设置">AI 设置</button>
-        <button id="scLocalMgrBtn" class="ghost mini" title="打开本地模型的设置：选主模型和视觉投影、打开模型文件夹、启停服务">本地模型管理</button>
-        <span class="sc-aist sc-fml" title="综合分就是排序默认用的那个分数；只跑技术评分时显示的就是技术分">综合分 = 技术×0.55 + AI×0.45</span>
-      </div>
+                    <label class="check sc-aichk" title="勾上才会调用大模型做语义判别；不勾只跑本机技术评分（离线、不联网）">
+                      <input id="scAiOn" type="checkbox"> AI 语义评分
+                    </label>
+                    <label class="chk-inline" title="照片里是什么类群，AI 就按那一类的鉴定要点评">
+                      评分对象 <select id="scAiTaxon"></select>
+                    </label>
+                    <label class="check sc-quick-strict" id="scQuickStrictWrap" title="进阶：按当前评分对象的鉴定标准严格评审（逐项检查该类群的鉴定关键部位）。「通用(自动判断)」没有专属判据，勾了也不生效。">
+                      <input id="scQuickStrict" type="checkbox"> <span id="scQuickStrictTxt">（进阶）专用检测</span>
+                    </label>
+                    <label class="chk-inline" title="云端＝阿里云百炼（要自己的 API Key）；本地＝llama.cpp 在本机跑">
+                      引擎 <select id="scAiEngine">
+                        <option value="cloud">云端百炼</option>
+                        <option value="local">本地模型</option>
+                      </select>
+                    </label>
+                    <select id="scAiModel" class="nat-sel sc-aimodel" title="用哪个模型判别"></select>
+                    <button id="scQuickLlama" class="ghost mini" title="不用打开设置：一键启动/停止内置的 llama.cpp 本地服务">启动本地服务</button>
+                    <span class="sc-aist" id="scAiStatus">未配置</span>
+                    <span class="nat-gap"></span>
+                    <button id="scCfgBtn" class="ghost mini" title="云端 API Key / 图片边长 / 每批张数等详细设置">AI 设置</button>
+                    <button id="scLocalMgrBtn" class="ghost mini" title="打开本地模型的设置：选主模型和视觉投影、打开模型文件夹、启停服务">本地模型管理</button>
+                    <span class="sc-aist sc-fml" title="综合分就是排序默认用的那个分数；只跑技术评分时显示的就是技术分">综合分 = 技术×0.55 + AI×0.45</span>
+                  </div>
 
-      <!-- 动作行：评分页只管评分。跨页的「送去标注 / 传到相册」已在别的页面有，不再重复 -->
       <div class="sc-actrow">
-        <span id="scSummary">还没评分</span>
-        <span class="sc-aist" id="scAiLeft"></span>
-        <span class="nat-gap"></span>
-        <span class="sc-aist" id="scSource" title="评分对象跟随左栏最上面的「本机端 / 相册端」切换">本机端</span>
-        <button id="scAiRunBtn" class="ghost mini" disabled title="对选中的照片调用 AI 判别">AI 判别选中</button>
-      </div>
+                    <span id="scSummary">还没评分</span>
+                    <span class="sc-aist" id="scAiLeft"></span>
+                    <span class="nat-gap"></span>
+                    <span class="sc-aist" id="scSource" title="评分对象跟随左栏最上面的「本机端 / 相册端」切换">本机端</span>
+                    <button id="scAiRunBtn" class="ghost mini" disabled title="对选中的照片调用 AI 判别">AI 判别选中</button>
+                  </div>
     </div>
 
     <!-- 各页顶部的控制条停靠在这里：文件夹树在上、控制在下面，主区整块让给内容 -->
@@ -228,7 +196,6 @@
         <button id="libCancelBtn" class="ghost mini" hidden>取消</button>
       </div>
     </div>
-
 
     <!-- 相册端：左栏换成自然在线的相册列表（本机端时整块藏起来） -->
     <div class="rail-head" id="railHeadAlbums" hidden><span>自然在线相册</span><b id="albumRailCount">0</b><button id="albumRailNewBtn" class="rail-refresh" type="button" title="新建相册">＋</button><button id="albumRailRefresh" class="rail-refresh" title="重新读一遍相册列表">↻</button></div>
@@ -390,11 +357,42 @@
       </div>
     </div><!-- /natView -->
 
-
     <!-- 「照片评分」：算法整体内置，页面不是外挂 iframe -->
     <div id="scoreView">
 
-      <div class="sc-dirs" id="scDirs" hidden></div>
+      <!-- 评分控件：横在主区顶部，和「↑ 上一层 / 本层 N 张」同一条；窄了就自动折行 -->
+      <div class="sc-head" id="scHead">
+        <div class="sc-dirs" id="scDirs" hidden></div>
+        <div class="sc-bar">
+                <span class="sc-dir" id="scDir" title="评分对象就是左边选中的文件夹">当前文件夹：—</span>
+                <span class="nat-gap"></span>
+                <select id="scStarSel" class="nat-sel" title="按星级筛选">
+                  <option value="">全部星级</option>
+                  <option value="3">★★★ 优选</option>
+                  <option value="2">★★ 良好</option>
+                  <option value="1">★ 可留</option>
+                  <option value="0">0★ / 废片</option>
+                </select>
+                <select id="scSortSel" class="nat-sel" title="排序">
+                  <option value="final">按综合分</option>
+                  <option value="score">按技术分</option>
+                  <option value="ai">按 AI 分</option>
+                  <option value="name">按文件名</option>
+                </select>
+                <button id="scSelAll" class="ghost mini" title="选中本层当前显示的全部照片">全选</button>
+                <button id="scSelNone" class="ghost mini" title="取消全部勾选" disabled>清空</button>
+                <span class="sc-selinfo" id="scSelInfo"></span>
+                <button id="scBurstBtn" class="ghost mini" title="把连拍/重复的照片折叠成一组，只留封面">连拍分组</button>
+                <button id="scGroupBtn" class="ghost mini" title="照原版评分器的分组页：按 3/5/10 级把已评分的照片分成一组一组看，还能把低分组整体搬到别的文件夹">评分分组</button>
+                <button id="scCompareBtn" class="ghost mini" disabled title="勾选两张照片，并排对比技术分、AI 分和各评分点">对比选中</button>
+                <button id="scClearBtn" class="ghost mini" title="清除评分：勾了就只清勾选的那几张，没勾清整个文件夹（照片本身不动）">清除评分</button>
+                <button id="scRunBtn" class="primary mini" title="开始评分：勾了就只评勾选的那几张，没勾评整个文件夹">开始评分</button>
+              </div>
+      </div>
+
+      
+
+      
 
       <div class="sc-progress" id="scProgress" hidden>
         <span id="scProgText">准备中…</span>

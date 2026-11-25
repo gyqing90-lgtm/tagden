@@ -2319,132 +2319,33 @@ html[data-theme="dark"] {
 .sc-actrow > select { flex: 0 0 auto; }
 .sc-aichk { white-space: nowrap; }
 
-/* ---------- 评分控件搬进左栏后的排版 ----------
-   三行原本是「整条横幅横排」，左栏只有 288px，横排会横向溢出。
-   这里统一改成网格：按钮按 3 列铺，标签和 select 各自占满一行。
-   面板限高 56%，内容再多就在面板内滚动，文件树至少留出能点的高度。 */
-.rail-score {
-  /* 树固定占 1/3，剩下的高度全归控件；内容再多也是面板自己滚 */
-  flex: 0 1 auto;
-  min-height: 0;
-  max-height: none;
-  overflow-y: auto;
+/* ---------- 评分页顶部：上一层 / 本层计数 和评分控件同一条 ----------
+   控件原来占主区三行横幅，后来搬进左栏，左栏又装不下（要滚），最终回到主区顶部，
+   和「↑ 上一层 · 本层 N 张」并成同一条，窄了自动折行。 */
+.sc-head {
   display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 8px 10px 9px;
-  background: var(--card);
-  border-top: 1px solid var(--line);
-}
-/* .rail 是 flex 容器，[hidden] 会被 display:flex 顶掉，必须显式压 */
-.rail-score[hidden] { display: none !important; }
-/* 里面的小标签（已选 N 张、剩余时间等）JS 会给 hidden，别让 inline-flex 把它顶出来 */
-.rail-score [hidden] { display: none !important; }
-.rail-score .sc-bar,
-.rail-score .sc-airow,
-.rail-score .sc-actrow {
-  display: grid;
-  gap: 4px;
-  padding: 0;
-  background: none;
-  border: 0;
-  font-size: 11.5px;
-}
-/* auto-fit：左栏拖宽一点，按钮自动多排一列，面板就矮一截 */
-.rail-score .sc-bar { grid-template-columns: repeat(auto-fit, minmax(84px, 1fr)); }
-.rail-score .sc-airow { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
-/* 动作行固定两列：摘要一行，下面「本机端 / AI 判别选中」并排 */
-.rail-score .sc-actrow { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-/* 主区那条「子项一律不压缩」在这里会顶出横向滚动，放开 */
-.rail-score .sc-bar > *,
-.rail-score .sc-airow > *,
-.rail-score .sc-actrow > * {
-  flex: 0 1 auto;
-  min-width: 0;
-}
-.rail-score .nat-gap { display: none; }
-.rail-score .sc-dir,
-.rail-score #scSelInfo,
-.rail-score #scAiModel,
-.rail-score #scSummary,
-.rail-score .sc-fml { grid-column: 1 / -1; }
-/* 评分摘要本来就长，在 132px 里会折成四五行，两行封顶 */
-.rail-score #scSummary {
-  display: -webkit-box;
-  -webkit-line-clamp: 1;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-.rail-score .sc-dir {
-  max-width: 100%;
-  font-size: 11.5px;
-  line-height: 1.5;
-  white-space: normal;
-  word-break: break-all;
-}
-.rail-score .chk-inline {
-  gap: 3px;
-  line-height: 1.3;
-  font-size: 10.5px;
-  color: var(--ink-3);
-}
-/* 标签和下拉挤一行：下拉吃掉剩下的宽度，文字太长就自己省略 */
-.rail-score .chk-inline select { flex: 0 1 auto; min-width: 0; width: auto; max-width: calc(100% - 30px); }
-.rail-score .sc-quick-strict { justify-content: flex-start; }
-.rail-score select {
-  height: 23px;
-  font-size: 11px;
-  max-width: 100%;
-  text-overflow: ellipsis;
-}
-.rail-score .ghost,
-.rail-score .primary {
-  font-size: 11px;
-  /* .mini 的 min-height:28px 会顶住压缩，这里显式放小，否则每行都是 28 */
-  min-height: 21px;
-  padding: 1px 5px;
-  line-height: 1.3;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.rail-score #scRunBtn { font-weight: 700; }
-.rail-score .sc-aist { font-size: 10.5px; white-space: normal; line-height: 1.25; }
-.rail-score .sc-fml { font-size: 10px; color: var(--ink-3); }
-/* 左栏窄，综合分公式这种常驻说明先让位；排序下拉的 tooltip 里还有一份 */
-@media (max-height: 780px) { .rail-score .sc-fml { display: none; } }
-/* 没勾照片时这块是空 span，会白占一整行 */
-.rail-score #scSelInfo:empty { display: none; }
-/* 标题条：右侧一个「收起」，收起后高度全给文件夹树 */
-.rail-score-head {
-  display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
-  padding-bottom: 4px;
-  margin-bottom: 2px;
-  border-bottom: 1px dashed var(--line);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: .5px;
-  color: var(--ink-3);
+  gap: 8px 12px;
+  padding: 8px 16px;
+  background: var(--card);
+  border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
 }
-.rail-score-head button {
+/* 嵌进这一条后，子块自己不再画背景和分隔线 */
+.sc-head .sc-dirs,
+.sc-head .sc-bar {
+  padding: 0;
   border: 0;
   background: none;
-  color: var(--ink-3);
-  font-size: 10.5px;
-  padding: 2px 5px;
-  border-radius: 5px;
-  cursor: pointer;
+  gap: 8px;
 }
-.rail-score-head button:hover { color: var(--green); background: var(--line-soft); }
-/* 收起：只留「当前文件夹 + 开始评分」，其余全藏，树拿回高度 */
-.rail-score.folded .sc-airow,
-.rail-score.folded .sc-actrow { display: none; }
-.rail-score.folded .sc-bar > *:not(.sc-dir):not(#scRunBtn) { display: none; }
-.rail-score.folded #scRunBtn { grid-column: 1 / -1; padding: 5px 8px; }
-/* 收起后按内容高度，别把剩下的一大片空白也涂成面板 */
-.rail-score.folded { flex: 0 0 auto; }
+.sc-head .sc-dirs { flex: 0 0 auto; }
+.sc-head .sc-bar { flex: 1 1 auto; }
+/* 路径太长时自己截断，别把后面一排按钮挤到第二行 */
+.sc-head .sc-dir { max-width: 160px; }
+/* 原来靠 .nat-gap 把路径和按钮顶到两头，这在这一条里反而会挤出换行 */
+.sc-head .nat-gap { display: none; }
 
 /* ---------- 左栏底部停靠槽：各页顶部的控制条 ----------
    和评分面板同一套思路：树在上，控制在下，主区整块让给内容。
@@ -2563,8 +2464,68 @@ html[data-theme="dark"] {
 .rail-dock .lib-bar { gap: 5px; margin: 0; }
 .rail-dock .lib-bar input { flex: 1 1 100%; min-width: 0; font-size: 11px; padding: 5px 7px; }
 
+/* ---------- 评分页停在左栏的两行：AI 行 + 摘要行 ----------
+   外框由 .rail-dock 负责，这里只把横排改成窄栏网格；
+   筛选和「开始评分」那一行留在主区顶部，所以这两行内容不多，能整块放下不用滚。 */
+.rail-score .sc-airow,
+.rail-score .sc-actrow {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(104px, 1fr));
+  gap: 5px;
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: 11.5px;
+  flex: 0 0 auto;
+}
+.rail-score .nat-gap { display: none; }
+/* 带下拉的和长文案各自占满一行，否则中文会被压成竖排 */
+.rail-score .chk-inline,
+.rail-score #scAiModel,
+.rail-score #scSummary,
+.rail-score .sc-fml { grid-column: 1 / -1; }
+.rail-score .chk-inline { gap: 4px; }
+.rail-score .chk-inline select { flex: 1 1 auto; min-width: 0; width: auto; max-width: none; }
+.rail-score .sc-airow select,
+.rail-score .sc-actrow select { height: 24px; font-size: 11px; }
+.rail-score .ghost,
+.rail-score .primary {
+  font-size: 11px;
+  /* .mini 的 min-height:28px 会顶住压缩 */
+  min-height: 21px;
+  padding: 1px 5px;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rail-score #scRunBtn { font-weight: 700; }
+.rail-score .sc-aist { font-size: 10.5px; white-space: normal; line-height: 1.3; }
+.rail-score .sc-fml { font-size: 10px; color: var(--ink-3); }
+/* 摘要和「本机端 / AI 判别选中」挤在同一行：左栏就 288px，别浪费一整行 */
+.rail-score .sc-actrow {
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  align-items: center;
+}
+.rail-score #scSummary {
+  grid-column: auto;
+  min-width: 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+/* 综合分公式在 288px 里要折两行，排序下拉的提示里已经有一份，这里省掉 */
+.rail-score .sc-fml { display: none; }
+/* 左栏顶部已经有「本机端 / 相册端」，这里再放一个纯属重复，把宽度让给摘要 */
+.rail-score #scSource { display: none; }
+.rail-score #scAiLeft:empty { display: none; }
+/* 没勾照片时这块是空 span，会白占一格 */
+.rail-score #scSelInfo:empty { display: none; }
+
 /* 树在上、控件在下：树固定占左栏高度的 1/3，剩下全给控件（空着也没关系） */
 .rail > .tree { flex: 0 0 33%; min-height: 0; }
+
 
 .sc-card .thumb { background: var(--line-soft); }
 .sc-star {
