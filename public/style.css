@@ -2354,7 +2354,9 @@ html[data-theme="dark"] {
    和评分面板同一套思路：树在上，控制在下，主区整块让给内容。
    原来的控制条是横排一整条，进了 288px 的窄列必须换成网格。 */
 .rail-dock {
-  flex: 0 1 auto;
+  /* 不参与压缩：控件该多高就多高，把剩下的高度全留给上面的树 / 相册列表。
+     以前是 flex:0 1 auto，相册列表在旁边时会被压掉十几像素，底部的按钮就看不全。 */
+  flex: 0 0 auto;
   min-height: 0;
   max-height: none;
   overflow-y: auto;
@@ -2379,7 +2381,27 @@ html[data-theme="dark"] {
   background: none;
 }
 .rail-dock .crumbs { flex: 1 1 auto; gap: 5px; }
-.rail-dock .crumbs span { font-size: 11px; white-space: normal; word-break: break-all; }
+/* 窄栏里路径只占一行：折成两行会把下面一排按钮顶出可视区 */
+.rail-dock .crumbs span,
+.rail-dock .crumbs em {
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+/* 相册端标注控件里的「相册端 · 还没选相册 / 0 张」和左栏列表标题重复，收掉这一行，
+   控件才放得下（少了这行会矮 20px，底部「识别选中」被裁） */
+body.src-album #dockAnnotate .crumbs { display: none; }
+/* 相册端的「全选本页 / 清空 / 撤销」原来挤在一个 86px 的格子里折成两行，
+   整行拉平后省 26px，正好放下下面的「更多」和「识别选中」 */
+body.src-album #dockAnnotate .tool-group {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 5px;
+}
+body.src-album #dockAnnotate .tool-group > * { flex: 1 1 0; min-width: 0; }
 .rail-dock .tools {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(84px, 1fr));
@@ -3176,7 +3198,8 @@ html[data-theme="dark"] {
 .nat-write-hint { font-size: 11.5px; line-height: 1.55; margin-top: 6px; }
 
 /* 相册端左栏：相册列表 */
-.album-rail { padding: 6px; overflow: auto; flex: 1 1 auto; }
+/* 相册列表占文件夹树的位置：上面是列表（自己滚），下面是本页控件 */
+.album-rail { padding: 6px; overflow: auto; flex: 1 1 auto; min-height: 0; }
 .album-rail .ar-item {
   display: flex;
   align-items: center;

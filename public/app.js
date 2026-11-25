@@ -7078,6 +7078,8 @@ async function setSource(mode, opts = {}) {
   const alb = m === 'album';
   if ($('srcSeg')) [...$('srcSeg').children].forEach((b) => b.classList.toggle('on', b.dataset.src === m));
   $('panel').classList.toggle('nat-mode', alb);
+  // 整个 body 挂一个钩子：相册端 / 本机端各页控件的差异都靠它写 CSS
+  document.body.classList.toggle('src-album', alb);
   $('panelEmpty').hidden = false;
   $('panelBody').hidden = true;
   $('railHeadFiles').hidden = alb;
@@ -7095,7 +7097,16 @@ async function setSource(mode, opts = {}) {
   // 批量鉴定只在相册端出现（本机端没有「写回站点鉴定」这回事）
   if ($('tagBatchBtn')) $('tagBatchBtn').hidden = !alb;
   if (alb) {
-    await enterAlbumMode();
+    // 先按同步路径清空网格：相册没登录 / 没选相册时，上一个本机文件夹的卡片
+    // 会一直挂在照片区（左栏已经写着「0 张」），看着像没切过来
+    S.files = [];
+    S.dirs = [];
+    renderAlbum();
+    try {
+      await enterAlbumMode();
+    } catch (e) {
+      console.warn('相册列表没拉下来', e);
+    }
   } else {
     const snap = S.localSnap || {};
     S.files = snap.files || [];
